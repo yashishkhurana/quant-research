@@ -44,6 +44,17 @@ class CarryParams:
     max_gross: float = 2.0
     kill_dd: float = 0.08
     cooldown_bars: int = 24 * 3  # bars (hours) flat after a kill
+    universe_n: int = 40         # tradeable set = top N by trailing dollar volume, point in time
+    volume_window: int = 24 * 30 # bars of trailing volume used for that rank
+
+
+def point_in_time_universe(dollar_volume: pd.DataFrame, n: int, window: int) -> pd.DataFrame:
+    """Boolean mask, True where an asset is in the top-n by trailing `window`-bar dollar volume
+    as of that bar. Uses only past volume, so a coin enters the universe when it becomes liquid
+    and leaves when it stops trading, which is how a live desk would have seen it."""
+    tv = dollar_volume.fillna(0.0).rolling(window, min_periods=window // 4).sum()
+    rank = tv.where(tv > 0).rank(axis=1, ascending=False)
+    return rank.le(n)
 
 
 def annualised_carry(funding: pd.DataFrame, lookback: int) -> pd.DataFrame:
@@ -51,9 +62,12 @@ def annualised_carry(funding: pd.DataFrame, lookback: int) -> pd.DataFrame:
     return funding.rolling(lookback, min_periods=max(2, lookback // 2)).mean() * SETTLEMENTS_PER_YEAR
 
 
-def build_weights(prices: pd.DataFrame, funding: pd.DataFrame, p: CarryParams) -> pd.DataFrame:
+def build_weights(prices: pd.DataFrame, funding: pd.DataFrame, p: CarryParams,
+                  dollar_volume: pd.DataFrame | None = None) -> pd.DataFrame:
     """prices: columns like 'BTC-PERP' and 'BTC-SPOT' on a common bar index.
     funding: columns = base symbols ('BTC'), index = settlement times.
+    dollar_volume: optional, columns = base symbols, perp quote volume per bar; when given the
+    tradeable set at each bar is the top `p.universe_n` by trailing volume (point in time).
     Returns weights on the same columns as prices."""
     bases = sorted({c.split("-")[0] for c in prices.columns if c.endswith("-PERP")})
     bases = [b for b in bases if f"{b}-SPOT" in prices.columns and b in funding.columns]
@@ -62,6 +76,10 @@ def build_weights(prices: pd.DataFrame, funding: pd.DataFrame, p: CarryParams) -
     carry = carry.reindex(prices.index, method="ffill")          # last settled value, no look-ahead
 
     tradeable = prices[[f"{b}-PERP" for b in bases]].notna().values & prices[[f"{b}-SPOT" for b in bases]].notna().values
+    if dollar_volume is not None:
+        in_univ = point_in_time_universe(dollar_volume.reindex(columns=bases).reindex(prices.index),
+                                         p.universe_n, p.volume_window)
+        tradeable &= in_univ.fillna(False).values
     carry = carry.where(tradeable, np.nan)
 
     # hysteresis state machine, vectorised per column
@@ -105,13 +123,14 @@ def kill_mask(equity: pd.Series, p: CarryParams, prior: np.ndarray | None = None
 
 
 def run_with_risk(prices: pd.DataFrame, funding_rates: pd.DataFrame, p: CarryParams,
-                  fee_bps: float = 4.0, slippage_bps: float = 3.0, max_iter: int = 8):
+                  fee_bps: float = 4.0, slippage_bps: float = 3.0, max_iter: int = 8,
+                  dollar_volume: pd.DataFrame | None = None):
     """Full pipeline: weights -> engine -> kill-switch -> engine, until the flat mask stops growing.
     funding_rates columns = base symbols; mapped onto the perp columns for the engine."""
     from qr.backtest.engine import run
 
     f_perp = funding_rates.rename(columns={b: f"{b}-PERP" for b in funding_rates.columns})
-    w = build_weights(prices, funding_rates, p)
+    w = build_weights(prices, funding_rates, p, dollar_volume)
     kw = dict(fee_bps=fee_bps, slippage_bps=slippage_bps, funding=f_perp, max_gross=p.max_gross)
     res = run(prices, w, **kw)
     mask = None

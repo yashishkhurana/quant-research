@@ -27,7 +27,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 
 def load(bases: list[str], start: str, end: str):
-    closes, fund = {}, {}
+    closes, fund, dvol = {}, {}, {}
     for b in bases:
         kp = read_range("raw", "binance", "klines_1h", f"{b}-PERP", start, end)
         ks = read_range("raw", "binance", "klines_1h", f"{b}-SPOT", start, end)
@@ -38,11 +38,14 @@ def load(bases: list[str], start: str, end: str):
         closes[f"{b}-PERP"] = kp["close"]
         closes[f"{b}-SPOT"] = ks["close"]
         fund[b] = f["rate"]
+        dvol[b] = kp["quote_vol"] if "quote_vol" in kp else kp["close"] * kp["volume"]
     prices = pd.DataFrame(closes).sort_index()
     prices = prices[~prices.index.duplicated()]
     funding = pd.DataFrame(fund).sort_index()
     funding = funding[~funding.index.duplicated()]
-    return prices, funding
+    dollar_volume = pd.DataFrame(dvol).sort_index()
+    dollar_volume = dollar_volume[~dollar_volume.index.duplicated()].reindex(prices.index)
+    return prices, funding, dollar_volume
 
 
 def stress(res, windows: dict[str, tuple[str, str]]) -> pd.DataFrame:
@@ -59,21 +62,26 @@ def stress(res, windows: dict[str, tuple[str, str]]) -> pd.DataFrame:
 
 def main(a):
     bases = [l.strip() for l in open(a.universe) if l.strip()]
-    prices, funding = load(bases, a.start, a.end)
-    print(f"universe {len(funding.columns)} assets, {len(prices)} hourly bars, "
+    prices, funding, dvol = load(bases, a.start, a.end)
+    print(f"{len(funding.columns)} assets with data, {len(prices)} hourly bars, "
           f"{prices.index[0]} -> {prices.index[-1]}")
 
-    base = CarryParams()
-    res = run_with_risk(prices, funding, base)
+    base = CarryParams(universe_n=a.universe_n)
+    rr = lambda pr, fu, p: run_with_risk(pr, fu, p, dollar_volume=dvol)
+    res = rr(prices, funding, base)
+    univ = (dvol.notna() & (dvol.rolling(base.volume_window, min_periods=base.volume_window // 4).sum() > 0)).sum(axis=1)
+    m_extra = {"assets_with_data": int(len(funding.columns)), "universe_n": a.universe_n,
+               "avg_assets_eligible": float(univ.mean()),
+               "n_delisted_in_sample": int((prices.filter(like="-PERP").notna().iloc[-1] == False).sum())}
     tearsheet(res, "Funding carry, base params", out=OUT / "tearsheet.png")
     lev = implied_leverage(res)
-    m = dict(res.metrics)
+    m = dict(res.metrics); m.update(m_extra)
     m["avg_perp_leverage"] = float(lev.mean()); m["max_perp_leverage"] = float(lev.max())
     m["avg_n_assets"] = float((res.weights.abs() > 0).sum(axis=1).div(2).mean())
 
     # no-risk-layer comparison: same signal, no kill switch
     f_perp = funding.rename(columns=lambda b: f"{b}-PERP")
-    res_nr = run(prices, build_weights(prices, funding, base), fee_bps=4, slippage_bps=3,
+    res_nr = run(prices, build_weights(prices, funding, base, dvol), fee_bps=4, slippage_bps=3,
                  funding=f_perp, max_gross=base.max_gross)
     m["sharpe_no_kill"] = res_nr.metrics["sharpe"]; m["max_dd_no_kill"] = res_nr.metrics["max_drawdown"]
 
@@ -82,8 +90,8 @@ def main(a):
     tbl = pd.DataFrame(index=grid_lb, columns=grid_entry, dtype=float)
     trials = []
     for lb, en in itertools.product(grid_lb, grid_entry):
-        p = CarryParams(lookback=lb, entry_apr=en, exit_apr=en * 0.3)
-        r = run_with_risk(prices, funding, p)
+        p = CarryParams(lookback=lb, entry_apr=en, exit_apr=en * 0.3, universe_n=a.universe_n)
+        r = rr(prices, funding, p)
         tbl.loc[lb, en] = r.metrics["sharpe"]; trials.append(r.returns)
     tbl.to_csv(OUT / "grid_sharpe.csv")
     per_bar_sr = pd.Series([t.mean() / t.std(ddof=1) for t in trials])
@@ -99,11 +107,11 @@ def main(a):
         tr = slice(start, start + bars_train); te = slice(start + bars_train, start + bars_train + bars_test)
         best, best_sr = None, -np.inf
         for lb, en in itertools.product(grid_lb, grid_entry):
-            p = CarryParams(lookback=lb, entry_apr=en, exit_apr=en * 0.3)
-            sr = run_with_risk(prices.iloc[tr], funding, p).metrics.get("sharpe", -np.inf)
+            p = CarryParams(lookback=lb, entry_apr=en, exit_apr=en * 0.3, universe_n=a.universe_n)
+            sr = rr(prices.iloc[tr], funding, p).metrics.get("sharpe", -np.inf)
             if sr > best_sr:
                 best, best_sr = p, sr
-        oos.append(run_with_risk(prices.iloc[te], funding, best).returns)
+        oos.append(rr(prices.iloc[te], funding, best).returns)
         start += bars_test
     if oos:
         o = pd.concat(oos)
@@ -138,13 +146,13 @@ def write_note(m, tbl, st, prices, funding, p: CarryParams):
         st_md += f"| {r['window']} | {pct(r['return'])} | {pct(r['max_dd'])} | {pct(r['worst_bar'])} |\n"
     note = f"""# Funding-rate carry on Binance perps
 
-**One line:** delta-neutral long-spot / short-perp across the top {len(funding.columns)} USDT perps, held when trailing funding annualises above {p.entry_apr:.0%}; {pct(m['ann_return'])} a year net of fees, slippage and funding, Sharpe {f2(m['sharpe'])}, max drawdown {pct(m['max_drawdown'])}, {period}.
+**One line:** delta-neutral long-spot / short-perp across the top {m['universe_n']} Binance USDT perps by trailing volume (point in time, from {m['assets_with_data']} listed contracts), held when trailing funding annualises above {p.entry_apr:.0%}; {pct(m['ann_return'])} a year net of fees, slippage and funding, Sharpe {f2(m['sharpe'])}, max drawdown {pct(m['max_drawdown'])}, {period}.
 
 ## Hypothesis
 Perp funding is paid by whoever is crowded. When longs crowd in, funding goes positive and a short perp hedged with spot collects it with no directional exposure. The edge is a risk premium for providing the other side, not a mispricing, so it should be small on majors, larger on alts, and should vanish exactly when it is most needed (deleveraging events, when basis blows out and the hedge is not free).
 
 ## Data
-Binance USDT-M perps and Binance spot, hourly closes, {period}. Funding settled every 8h from the fapi funding endpoint. Universe: top {len(funding.columns)} perps by 24h volume at download, including contracts that have since been delisted; an asset is only tradeable on bars where both perp and spot have a price, and a delisting force-closes the position at the last price with the exit paid for.
+Binance USDT-M perps and Binance spot, hourly closes, {period}. Funding settled every 8h from the fapi funding endpoint. Universe: {m['assets_with_data']} USDT perps with funding, perp and spot history (every contract Binance has listed in the window, delisted ones included; {m['n_delisted_in_sample']} are no longer trading at the end of the sample). At each bar the tradeable set is the top {m['universe_n']} by trailing 30-day dollar volume, ranked point in time, averaging {m['avg_assets_eligible']:.0f} eligible names; nothing is selected on what is liquid today. An asset is only tradeable on bars where both perp and spot have a price, and a delisting force-closes the position at the last price with the exit paid for.
 
 ## Method
 Signal: trailing mean funding over {p.lookback} settlements, annualised. Enter when above {p.entry_apr:.0%} APR, exit when below {p.exit_apr:.0%} (hysteresis). Equal weight across qualifying assets, at most {p.max_assets} assets, at most {p.max_weight:.0%} of equity per leg, gross capped at {p.max_gross:.1f}x. Rebalance hourly on signal changes only. Costs: {4} bps fee + {3} bps slippage per leg on turnover. Risk layer: flatten everything if drawdown exceeds {p.kill_dd:.0%} and stay flat {p.cooldown_bars} hours. The weight at bar t uses funding settled at or before t and earns t to t+1; nothing is shifted inside the backtester.
@@ -191,4 +199,6 @@ if __name__ == "__main__":
     ap.add_argument("--start", default="2023-01-01")
     ap.add_argument("--end", default=pd.Timestamp.now('UTC').strftime("%Y-%m-%d"))
     ap.add_argument("--universe", default="data/universe.txt")
+    ap.add_argument("--universe-n", dest="universe_n", type=int, default=40,
+                    help="tradeable set at each bar = top N by trailing 30-day volume")
     main(ap.parse_args())

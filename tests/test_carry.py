@@ -60,3 +60,15 @@ def test_kill_mask_flattens_after_breach_and_grows_monotonically():
     assert m1.any() and not m1[:50].any()
     m2 = kill_mask(eq, p, m1)
     assert (m2 >= m1).all()
+
+
+def test_point_in_time_universe_uses_only_past_volume():
+    from qr.strategies.carry import point_in_time_universe
+    idx = pd.date_range("2024-01-01", periods=100, freq="1h", tz="UTC")
+    v = pd.DataFrame({"A": 10.0, "B": 1.0, "C": np.nan}, index=idx)
+    v.loc[idx[60]:, "B"] = 100.0                       # B becomes liquid at bar 60
+    m = point_in_time_universe(v, n=1, window=10)
+    assert m["A"].iloc[30] and not m["B"].iloc[30]
+    assert m["B"].iloc[90] and not m["A"].iloc[90]
+    assert not m["B"].iloc[59]                          # the bar before it turns liquid: not yet
+    assert not m["C"].any()

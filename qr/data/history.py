@@ -50,6 +50,15 @@ def list_symbols(include_delisted: bool = True) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def all_perp_bases(onboarded_before: str | None = None) -> list[str]:
+    """Every USDT perp Binance has listed, delisted ones included (status != TRADING), so the
+    universe is not selected on survival. Optionally keep only contracts listed before a date."""
+    df = list_symbols(include_delisted=True)
+    if onboarded_before:
+        df = df[df["onboard"] < pd.Timestamp(onboarded_before, tz="UTC")]
+    return sorted(df["base"].unique().tolist())
+
+
 def top_by_volume(n: int = 50) -> list[str]:
     t = _get("/fapi/v1/ticker/24hr")
     df = pd.DataFrame(t)
@@ -168,7 +177,7 @@ def download(dataset: str, bases: list[str], start: str, end: str, interval: str
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("dataset", choices=["klines", "spot", "funding", "oi", "universe"])
+    ap.add_argument("dataset", choices=["klines", "spot", "funding", "oi", "universe", "universe-all"])
     ap.add_argument("--symbols", nargs="+", default=["BTC", "ETH", "SOL"])
     ap.add_argument("--start", default="2024-01-01")
     ap.add_argument("--end", default=pd.Timestamp.now('UTC').strftime("%Y-%m-%d"))
@@ -177,5 +186,7 @@ if __name__ == "__main__":
     a = ap.parse_args()
     if a.dataset == "universe":
         print("\n".join(top_by_volume(a.top)))
+    elif a.dataset == "universe-all":
+        print("\n".join(all_perp_bases(onboarded_before=a.end)))
     else:
         download(a.dataset, a.symbols, a.start, a.end, a.interval)
