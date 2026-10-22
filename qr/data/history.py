@@ -23,15 +23,24 @@ BASE = "https://fapi.binance.com"
 _S = requests.Session()
 
 
-def _get(path: str, **params):
-    for attempt in range(5):
-        r = _S.get(BASE + path, params=params, timeout=20)
+def _get(path: str, base: str = BASE, ok_missing: bool = False, **params):
+    """GET with retries on rate limits, 5xx and dropped/timed-out connections.
+    ok_missing: return None on 400/404 (e.g. no spot market for this base)."""
+    err = None
+    for attempt in range(6):
+        try:
+            r = _S.get(base + path, params=params, timeout=20)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            err = e; time.sleep(2 ** attempt)
+            continue
+        if ok_missing and r.status_code in (400, 404):
+            return None
         if r.status_code == 429 or r.status_code >= 500:
-            time.sleep(2 ** attempt)
+            err = requests.HTTPError(f"{r.status_code} on {path}"); time.sleep(2 ** attempt)
             continue
         r.raise_for_status()
         return r.json()
-    r.raise_for_status()
+    raise err
 
 
 def list_symbols(include_delisted: bool = True) -> pd.DataFrame:
@@ -84,12 +93,10 @@ def klines(base: str, start: str, end: str, interval: str = "1m", market: str = 
         if market == "perp":
             rows = _get("/fapi/v1/klines", symbol=sym, interval=interval, startTime=t0, endTime=t1, limit=1500)
         else:
-            r = _S.get(SPOT_BASE + "/api/v3/klines", params=dict(symbol=sym, interval=interval, startTime=t0,
-                                                                  endTime=t1, limit=1000), timeout=20)
-            if r.status_code in (400, 404):      # no spot market for this base
+            rows = _get("/api/v3/klines", base=SPOT_BASE, ok_missing=True, symbol=sym, interval=interval,
+                        startTime=t0, endTime=t1, limit=1000)
+            if rows is None:                     # no spot market for this base
                 return pd.DataFrame()
-            r.raise_for_status()
-            rows = r.json()
         if not rows:
             break
         out += rows
@@ -169,7 +176,7 @@ def download(dataset: str, bases: list[str], start: str, end: str, interval: str
                 df = funding(b, start, end); ds, suf = "funding", "-PERP"
             else:
                 df = open_interest_5m(b, start, end); ds, suf = "oi", "-PERP"
-        except (requests.HTTPError, ValueError) as e:
+        except (requests.RequestException, ValueError) as e:
             print(f"{b}: skipped ({e})"); continue
         n = append_rows(df, "raw", "binance", ds, f"{b.upper()}{suf}")
         print(f"{b} {dataset}: {len(df)} rows -> {len(n)} day files", flush=True)
