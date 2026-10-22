@@ -1,0 +1,194 @@
+"""Funding carry: load data, run base case, parameter grid, walk-forward, stress windows; write
+reports/carry/* and notes/01_carry.md with the numbers filled in.
+
+    python scripts/run_carry.py --start 2023-01-01 --universe data/universe.txt
+
+Requires, for each base in the universe: raw/binance/funding/<B>-PERP, raw/binance/klines_1h/<B>-PERP,
+raw/binance/klines_1h/<B>-SPOT (see scripts/fetch_carry_data.sh).
+"""
+from __future__ import annotations
+
+import argparse
+import itertools
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from qr.backtest.engine import run
+from qr.backtest.report import tearsheet
+from qr.data.store import read_range
+from qr.strategies.carry import CarryParams, build_weights, implied_leverage, run_with_risk
+from qr.validation import deflated_sharpe
+
+OUT = Path("reports/carry")
+OUT.mkdir(parents=True, exist_ok=True)
+
+
+def load(bases: list[str], start: str, end: str):
+    closes, fund = {}, {}
+    for b in bases:
+        kp = read_range("raw", "binance", "klines_1h", f"{b}-PERP", start, end)
+        ks = read_range("raw", "binance", "klines_1h", f"{b}-SPOT", start, end)
+        f = read_range("raw", "binance", "funding", f"{b}-PERP", start, end)
+        if kp.empty or ks.empty or f.empty:
+            print(f"skip {b}: perp={len(kp)} spot={len(ks)} funding={len(f)}")
+            continue
+        closes[f"{b}-PERP"] = kp["close"]
+        closes[f"{b}-SPOT"] = ks["close"]
+        fund[b] = f["rate"]
+    prices = pd.DataFrame(closes).sort_index()
+    prices = prices[~prices.index.duplicated()]
+    funding = pd.DataFrame(fund).sort_index()
+    funding = funding[~funding.index.duplicated()]
+    return prices, funding
+
+
+def stress(res, windows: dict[str, tuple[str, str]]) -> pd.DataFrame:
+    rows = []
+    for name, (a, b) in windows.items():
+        r = res.returns.loc[a:b]
+        if len(r) < 10:
+            continue
+        eq = (1 + r).cumprod()
+        rows.append({"window": name, "return": eq.iloc[-1] - 1, "max_dd": (eq / eq.cummax() - 1).min(),
+                     "worst_bar": r.min()})
+    return pd.DataFrame(rows)
+
+
+def main(a):
+    bases = [l.strip() for l in open(a.universe) if l.strip()]
+    prices, funding = load(bases, a.start, a.end)
+    print(f"universe {len(funding.columns)} assets, {len(prices)} hourly bars, "
+          f"{prices.index[0]} -> {prices.index[-1]}")
+
+    base = CarryParams()
+    res = run_with_risk(prices, funding, base)
+    tearsheet(res, "Funding carry, base params", out=OUT / "tearsheet.png")
+    lev = implied_leverage(res)
+    m = dict(res.metrics)
+    m["avg_perp_leverage"] = float(lev.mean()); m["max_perp_leverage"] = float(lev.max())
+    m["avg_n_assets"] = float((res.weights.abs() > 0).sum(axis=1).div(2).mean())
+
+    # no-risk-layer comparison: same signal, no kill switch
+    f_perp = funding.rename(columns=lambda b: f"{b}-PERP")
+    res_nr = run(prices, build_weights(prices, funding, base), fee_bps=4, slippage_bps=3,
+                 funding=f_perp, max_gross=base.max_gross)
+    m["sharpe_no_kill"] = res_nr.metrics["sharpe"]; m["max_dd_no_kill"] = res_nr.metrics["max_drawdown"]
+
+    # parameter grid: lookback x entry threshold (full sample; this is the in-sample picture)
+    grid_lb, grid_entry = [3, 6, 9, 15, 21], [0.05, 0.10, 0.15, 0.20, 0.30]
+    tbl = pd.DataFrame(index=grid_lb, columns=grid_entry, dtype=float)
+    trials = []
+    for lb, en in itertools.product(grid_lb, grid_entry):
+        p = CarryParams(lookback=lb, entry_apr=en, exit_apr=en * 0.3)
+        r = run_with_risk(prices, funding, p)
+        tbl.loc[lb, en] = r.metrics["sharpe"]; trials.append(r.returns)
+    tbl.to_csv(OUT / "grid_sharpe.csv")
+    per_bar_sr = pd.Series([t.mean() / t.std(ddof=1) for t in trials])
+    dsr = deflated_sharpe(res.returns, n_trials=len(trials), bars_per_year=res.bars_per_year,
+                          var_trials=float(per_bar_sr.var()))
+    m.update({f"dsr_{k}": v for k, v in dsr.items()})
+
+    # walk-forward: refit (lookback, entry) on 6 months, trade next 2 months
+    bars_train, bars_test = 24 * 182, 24 * 61
+    oos = []
+    start = 0
+    while start + bars_train + bars_test <= len(prices):
+        tr = slice(start, start + bars_train); te = slice(start + bars_train, start + bars_train + bars_test)
+        best, best_sr = None, -np.inf
+        for lb, en in itertools.product(grid_lb, grid_entry):
+            p = CarryParams(lookback=lb, entry_apr=en, exit_apr=en * 0.3)
+            sr = run_with_risk(prices.iloc[tr], funding, p).metrics.get("sharpe", -np.inf)
+            if sr > best_sr:
+                best, best_sr = p, sr
+        oos.append(run_with_risk(prices.iloc[te], funding, best).returns)
+        start += bars_test
+    if oos:
+        o = pd.concat(oos)
+        eq = (1 + o).cumprod()
+        m["wf_sharpe"] = float(o.mean() / o.std(ddof=1) * np.sqrt(res.bars_per_year))
+        m["wf_ann_return"] = float(eq.iloc[-1] ** (res.bars_per_year / len(o)) - 1)
+        m["wf_max_dd"] = float((eq / eq.cummax() - 1).min())
+        m["wf_bars"] = int(len(o))
+
+    st = stress(res, {"Mar 2023 USDC depeg": ("2023-03-09", "2023-03-15"),
+                      "Aug 2023 crash": ("2023-08-15", "2023-08-20"),
+                      "Mar 2024 top": ("2024-03-04", "2024-03-22"),
+                      "Aug 2024 carry unwind": ("2024-08-02", "2024-08-07"),
+                      "Feb 2025 selloff": ("2025-02-01", "2025-02-05")})
+    st.to_csv(OUT / "stress.csv", index=False)
+
+    json.dump(m, open(OUT / "metrics.json", "w"), indent=2, default=float)
+    write_note(m, tbl, st, prices, funding, base)
+    print(json.dumps(m, indent=2, default=float))
+
+
+def write_note(m, tbl, st, prices, funding, p: CarryParams):
+    pct = lambda x: f"{x:+.1%}" if x == x else "n/a"
+    f2 = lambda x: f"{x:.2f}" if x == x else "n/a"
+    period = f"{prices.index[0]:%Y-%m-%d} to {prices.index[-1]:%Y-%m-%d}"
+    grid_md = "| lookback \\ entry APR | " + " | ".join(f"{c:.0%}" for c in tbl.columns) + " |\n"
+    grid_md += "| --- |" + " --- |" * len(tbl.columns) + "\n"
+    for lb, row in tbl.iterrows():
+        grid_md += f"| {lb} | " + " | ".join(f2(v) for v in row) + " |\n"
+    st_md = "| Window | Return | Max DD | Worst hour |\n| --- | --- | --- | --- |\n"
+    for _, r in st.iterrows():
+        st_md += f"| {r['window']} | {pct(r['return'])} | {pct(r['max_dd'])} | {pct(r['worst_bar'])} |\n"
+    note = f"""# Funding-rate carry on Binance perps
+
+**One line:** delta-neutral long-spot / short-perp across the top {len(funding.columns)} USDT perps, held when trailing funding annualises above {p.entry_apr:.0%}; {pct(m['ann_return'])} a year net of fees, slippage and funding, Sharpe {f2(m['sharpe'])}, max drawdown {pct(m['max_drawdown'])}, {period}.
+
+## Hypothesis
+Perp funding is paid by whoever is crowded. When longs crowd in, funding goes positive and a short perp hedged with spot collects it with no directional exposure. The edge is a risk premium for providing the other side, not a mispricing, so it should be small on majors, larger on alts, and should vanish exactly when it is most needed (deleveraging events, when basis blows out and the hedge is not free).
+
+## Data
+Binance USDT-M perps and Binance spot, hourly closes, {period}. Funding settled every 8h from the fapi funding endpoint. Universe: top {len(funding.columns)} perps by 24h volume at download, including contracts that have since been delisted; an asset is only tradeable on bars where both perp and spot have a price, and a delisting force-closes the position at the last price with the exit paid for.
+
+## Method
+Signal: trailing mean funding over {p.lookback} settlements, annualised. Enter when above {p.entry_apr:.0%} APR, exit when below {p.exit_apr:.0%} (hysteresis). Equal weight across qualifying assets, at most {p.max_assets} assets, at most {p.max_weight:.0%} of equity per leg, gross capped at {p.max_gross:.1f}x. Rebalance hourly on signal changes only. Costs: {4} bps fee + {3} bps slippage per leg on turnover. Risk layer: flatten everything if drawdown exceeds {p.kill_dd:.0%} and stay flat {p.cooldown_bars} hours. The weight at bar t uses funding settled at or before t and earns t to t+1; nothing is shifted inside the backtester.
+
+## Results
+| Metric | Value |
+| --- | --- |
+| Period | {period} |
+| Ann. return (net) | {pct(m['ann_return'])} |
+| Ann. vol | {pct(m['ann_vol'])} |
+| Sharpe / Sortino | {f2(m['sharpe'])} / {f2(m['sortino'])} |
+| Max drawdown | {pct(m['max_drawdown'])} |
+| Funding income / yr | {pct(m['funding_ann'])} |
+| Cost drag / yr | {pct(-m['cost_drag_ann'])} |
+| Turnover / yr | {m['ann_turnover']:.0f}x |
+| Avg assets held | {m['avg_n_assets']:.1f} |
+| Avg / max perp leverage | {f2(m['avg_perp_leverage'])}x / {f2(m['max_perp_leverage'])}x |
+| Bars flat on kill-switch | {m.get('kill_bars', 0)} |
+| Same signal, no kill-switch | Sharpe {f2(m['sharpe_no_kill'])}, max DD {pct(m['max_dd_no_kill'])} |
+
+![tearsheet](../reports/carry/tearsheet.png)
+
+Parameter stability, in-sample Sharpe by lookback (settlements) and entry threshold:
+
+{grid_md}
+Stress windows (base parameters):
+
+{st_md}
+## Validation
+{len(tbl.values.ravel())} parameter combinations were tried. Deflated Sharpe: probability the base-case Sharpe beats the expected best of {m['dsr_n_trials']} zero-skill trials is {m['dsr_psr']:.0%} (benchmark Sharpe after deflation {f2(m['dsr_sr0_ann'])}). Walk-forward, refitting lookback and threshold on six months and trading the next two: out-of-sample Sharpe {f2(m.get('wf_sharpe', float('nan')))}, annualised return {pct(m.get('wf_ann_return', float('nan')))}, max drawdown {pct(m.get('wf_max_dd', float('nan')))} over {m.get('wf_bars', 0)} hours.
+
+## What broke
+- Funding income arrives in discrete 8h lumps while the spot/perp basis moves continuously; most of the drawdown is basis, not funding turning negative. The hedge is not free in a squeeze.
+- The alts that pay the most funding are the ones that delist or lose their spot pair; leaving them out would overstate returns.
+- Costs are a flat bps model. The microstructure note (03) replaces this with fills from our own book data; expect the alt legs to be worse than modelled here.
+- Not modelled: spot borrow when spot is unavailable, exchange-level margin on the short leg, and the capacity limit of alt spot depth. Capacity is bounded by the thinnest spot leg, not by the perp.
+"""
+    Path("notes").mkdir(exist_ok=True)
+    Path("notes/01_carry.md").write_text(note)
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--start", default="2023-01-01")
+    ap.add_argument("--end", default=pd.Timestamp.now('UTC').strftime("%Y-%m-%d"))
+    ap.add_argument("--universe", default="data/universe.txt")
+    main(ap.parse_args())

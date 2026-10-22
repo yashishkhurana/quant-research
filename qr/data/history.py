@@ -58,18 +58,31 @@ def top_by_volume(n: int = 50) -> list[str]:
     return df.sort_values("quoteVolume", ascending=False)["symbol"].head(n).str.replace("USDT", "").tolist()
 
 
-def klines_1m(base: str, start: str, end: str) -> pd.DataFrame:
-    """1-minute klines, paged 1500 at a time. Returns ts-indexed OHLCV + trades + taker buy vol."""
+_INTERVAL_MS = {"1m": 60_000, "5m": 300_000, "15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
+SPOT_BASE = "https://api.binance.com"
+
+
+def klines(base: str, start: str, end: str, interval: str = "1m", market: str = "perp") -> pd.DataFrame:
+    """Klines at any interval, perp (fapi) or spot (api). Returns ts-indexed OHLCV + trades + taker buy vol."""
     sym = base.upper() + "USDT"
     t0 = int(pd.Timestamp(start, tz="UTC").timestamp() * 1000)
     t1 = int(pd.Timestamp(end, tz="UTC").timestamp() * 1000)
+    step = _INTERVAL_MS[interval]
     out = []
     while t0 < t1:
-        rows = _get("/fapi/v1/klines", symbol=sym, interval="1m", startTime=t0, endTime=t1, limit=1500)
+        if market == "perp":
+            rows = _get("/fapi/v1/klines", symbol=sym, interval=interval, startTime=t0, endTime=t1, limit=1500)
+        else:
+            r = _S.get(SPOT_BASE + "/api/v3/klines", params=dict(symbol=sym, interval=interval, startTime=t0,
+                                                                  endTime=t1, limit=1000), timeout=20)
+            if r.status_code in (400, 404):      # no spot market for this base
+                return pd.DataFrame()
+            r.raise_for_status()
+            rows = r.json()
         if not rows:
             break
         out += rows
-        t0 = rows[-1][0] + 60_000
+        t0 = rows[-1][0] + step
         time.sleep(0.05)
     if not out:
         return pd.DataFrame()
@@ -80,6 +93,10 @@ def klines_1m(base: str, start: str, end: str) -> pd.DataFrame:
     df = df.set_index("ts").astype(float)
     df["n_trades"] = df["n_trades"].astype(int)
     return df
+
+
+def klines_1m(base: str, start: str, end: str) -> pd.DataFrame:
+    return klines(base, start, end, "1m", "perp")
 
 
 def funding(base: str, start: str, end: str | None = None) -> pd.DataFrame:
@@ -130,24 +147,33 @@ def open_interest_5m(base: str, start: str, end: str) -> pd.DataFrame:
     return df.set_index("ts")[["oi", "oi_usd"]]
 
 
-def download(dataset: str, bases: list[str], start: str, end: str) -> None:
-    fn = {"klines": klines_1m, "funding": funding, "oi": open_interest_5m}[dataset]
-    ds_name = {"klines": "klines_1m", "funding": "funding", "oi": "oi"}[dataset]
+def download(dataset: str, bases: list[str], start: str, end: str, interval: str = "1m") -> None:
     for b in bases:
-        df = fn(b, start, end)
-        n = append_rows(df, "raw", "binance", ds_name, f"{b.upper()}-PERP")
-        print(f"{b}: {len(df)} rows -> {len(n)} day files")
+        try:
+            if dataset == "klines":
+                df = klines(b, start, end, interval, "perp"); ds, suf = f"klines_{interval}", "-PERP"
+            elif dataset == "spot":
+                df = klines(b, start, end, interval, "spot"); ds, suf = f"klines_{interval}", "-SPOT"
+            elif dataset == "funding":
+                df = funding(b, start, end); ds, suf = "funding", "-PERP"
+            else:
+                df = open_interest_5m(b, start, end); ds, suf = "oi", "-PERP"
+        except requests.HTTPError as e:
+            print(f"{b}: skipped ({e})"); continue
+        n = append_rows(df, "raw", "binance", ds, f"{b.upper()}{suf}")
+        print(f"{b} {dataset}: {len(df)} rows -> {len(n)} day files", flush=True)
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("dataset", choices=["klines", "funding", "oi", "universe"])
+    ap.add_argument("dataset", choices=["klines", "spot", "funding", "oi", "universe"])
     ap.add_argument("--symbols", nargs="+", default=["BTC", "ETH", "SOL"])
     ap.add_argument("--start", default="2024-01-01")
-    ap.add_argument("--end", default=pd.Timestamp.utcnow().strftime("%Y-%m-%d"))
+    ap.add_argument("--end", default=pd.Timestamp.now('UTC').strftime("%Y-%m-%d"))
+    ap.add_argument("--interval", default="1m")
     ap.add_argument("--top", type=int, default=50)
     a = ap.parse_args()
     if a.dataset == "universe":
         print("\n".join(top_by_volume(a.top)))
     else:
-        download(a.dataset, a.symbols, a.start, a.end)
+        download(a.dataset, a.symbols, a.start, a.end, a.interval)
