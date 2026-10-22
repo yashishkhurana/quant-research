@@ -38,7 +38,7 @@ def list_symbols(include_delisted: bool = True) -> pd.DataFrame:
     info = _get("/fapi/v1/exchangeInfo")
     rows = []
     for s in info["symbols"]:
-        if s["quoteAsset"] != "USDT" or s["contractType"] != "PERPETUAL":
+        if s["quoteAsset"] != "USDT" or s["contractType"] != "PERPETUAL" or s.get("underlyingType") != "COIN":
             continue
         if not include_delisted and s["status"] != "TRADING":
             continue
@@ -53,7 +53,9 @@ def list_symbols(include_delisted: bool = True) -> pd.DataFrame:
 def top_by_volume(n: int = 50) -> list[str]:
     t = _get("/fapi/v1/ticker/24hr")
     df = pd.DataFrame(t)
-    df = df[df["symbol"].str.endswith("USDT")]
+    # Only crypto perps that are trading now; the ticker also carries stock/commodity contracts (TSLA, XAU).
+    coins = set(list_symbols(include_delisted=False)["symbol"])
+    df = df[df["symbol"].isin(coins)]
     df["quoteVolume"] = df["quoteVolume"].astype(float)
     return df.sort_values("quoteVolume", ascending=False)["symbol"].head(n).str.replace("USDT", "").tolist()
 
@@ -121,7 +123,7 @@ def funding(base: str, start: str, end: str | None = None) -> pd.DataFrame:
     df = pd.DataFrame(out)
     df["ts"] = pd.to_datetime(df["fundingTime"], unit="ms", utc=True)
     df["rate"] = df["fundingRate"].astype(float)
-    df["mark"] = df.get("markPrice", pd.Series(dtype=float)).astype(float)
+    df["mark"] = pd.to_numeric(df.get("markPrice", pd.Series(dtype=float)), errors="coerce")  # "" on old rows
     return df.set_index("ts")[["rate", "mark"]]
 
 
@@ -158,7 +160,7 @@ def download(dataset: str, bases: list[str], start: str, end: str, interval: str
                 df = funding(b, start, end); ds, suf = "funding", "-PERP"
             else:
                 df = open_interest_5m(b, start, end); ds, suf = "oi", "-PERP"
-        except requests.HTTPError as e:
+        except (requests.HTTPError, ValueError) as e:
             print(f"{b}: skipped ({e})"); continue
         n = append_rows(df, "raw", "binance", ds, f"{b.upper()}{suf}")
         print(f"{b} {dataset}: {len(df)} rows -> {len(n)} day files", flush=True)
