@@ -70,8 +70,13 @@ def point_in_time_universe(dollar_volume: pd.DataFrame, n: int, window: int,
 
 
 def annualised_carry(funding: pd.DataFrame, lookback: int) -> pd.DataFrame:
-    """Trailing mean funding per settlement, annualised. Index = settlement timestamps."""
-    return funding.rolling(lookback, min_periods=max(2, lookback // 2)).mean() * SETTLEMENTS_PER_YEAR
+    """Trailing mean funding per fixed 8h window, annualised. `funding` is the raw per-settlement
+    matrix (index = settlement times); it is first summed onto 8h UTC windows so that coins on
+    4h or 1h settlement are comparable with 8h coins and `lookback` means 8h windows for all.
+    Index = window ends (00:00, 08:00, 16:00 UTC); the value at T is known at T."""
+    from qr.data.funding import per_window, WINDOWS_PER_YEAR
+    f8 = per_window(funding)
+    return f8.rolling(lookback, min_periods=max(2, lookback // 2)).mean() * WINDOWS_PER_YEAR
 
 
 def build_weights(prices: pd.DataFrame, funding: pd.DataFrame, p: CarryParams,
@@ -85,11 +90,17 @@ def build_weights(prices: pd.DataFrame, funding: pd.DataFrame, p: CarryParams,
     bases = [b for b in bases if b in funding.columns and (not p.hedged or f"{b}-SPOT" in prices.columns)]
 
     carry = annualised_carry(funding[bases], p.lookback)
+    window_ends = carry.index                                     # 8h window ends: the decision clock
     carry = carry.reindex(prices.index, method="ffill")          # last settled value, no look-ahead
 
-    tradeable = prices[[f"{b}-PERP" for b in bases]].notna().values.copy()
+    # priced: both legs have a price (a missing price is a delisting and forces an exit on that bar).
+    # tradeable: priced AND inside the point-in-time volume universe. Universe membership is only
+    # consulted when a selection is decided; a coin drifting out of the top-N between decisions is
+    # not force-closed, which is what made the hourly rank flips into round trips.
+    priced = prices[[f"{b}-PERP" for b in bases]].notna().values.copy()
     if p.hedged:                                                  # the hedge needs a spot price too
-        tradeable &= prices[[f"{b}-SPOT" for b in bases]].notna().values
+        priced &= prices[[f"{b}-SPOT" for b in bases]].notna().values
+    tradeable = priced.copy()
     if dollar_volume is not None:
         in_univ = point_in_time_universe(dollar_volume.reindex(columns=bases).reindex(prices.index),
                                          p.universe_n, p.volume_window, p.universe_exit_n)
@@ -113,11 +124,11 @@ def build_weights(prices: pd.DataFrame, funding: pd.DataFrame, p: CarryParams,
     ranked = carry.where(on).rank(axis=1, ascending=False)
     fresh = ranked.le(p.max_assets) & on
     sett_bar = pd.Series(False, index=prices.index)
-    sett_bar.iloc[np.unique(np.clip(prices.index.searchsorted(funding.index, side="left"), 0, len(prices.index) - 1))] = True
+    sett_bar.iloc[np.unique(np.clip(prices.index.searchsorted(window_ends, side="left"), 0, len(prices.index) - 1))] = True
     sel = np.zeros_like(fresh.values); prev = np.zeros(fresh.shape[1], dtype=bool)
-    fv, tr_v, sb = fresh.values, tradeable, sett_bar.values
+    fv, px_v, sb = fresh.values, priced, sett_bar.values
     for i in range(len(sel)):
-        prev = fv[i] if sb[i] else (prev & tr_v[i])
+        prev = fv[i] if sb[i] else (prev & px_v[i])              # between decisions: only delistings exit
         sel[i] = prev
     selected = pd.DataFrame(sel, index=fresh.index, columns=fresh.columns)
     n = selected.sum(axis=1).replace(0, np.nan)

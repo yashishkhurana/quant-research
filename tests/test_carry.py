@@ -123,3 +123,35 @@ def test_universe_hysteresis_stops_boundary_flipping():
     flips_plain = plain.astype(int).diff().abs().sum().sum()
     flips_hyst = hyst.astype(int).diff().abs().sum().sum()
     assert flips_hyst < flips_plain
+
+
+def test_carry_signal_is_per_8h_window_not_per_settlement():
+    """A coin settling every 4h at rate r must show the same APR as a coin settling every 8h at 2r."""
+    from qr.strategies.carry import annualised_carry
+    from qr.data.funding import WINDOWS_PER_YEAR
+    idx8 = pd.date_range("2024-01-01", periods=30, freq="8h", tz="UTC")
+    idx4 = pd.date_range("2024-01-01", periods=60, freq="4h", tz="UTC")
+    raw = pd.concat([pd.Series(0.0002, index=idx8, name="EIGHT"), pd.Series(0.0001, index=idx4, name="FOUR")], axis=1)
+    apr = annualised_carry(raw, lookback=3).dropna().iloc[3:-1]   # skip the partial first and last windows
+    assert np.allclose(apr["EIGHT"], apr["FOUR"])
+    assert np.allclose(apr["EIGHT"], 0.0002 * WINDOWS_PER_YEAR)
+
+
+def test_selection_is_decided_three_times_a_day_not_hourly():
+    """The selected set may only change on 8h window ends (00:00, 08:00, 16:00 UTC) or when a coin
+    loses its price (delisting). A coin crossing the volume-rank boundary between decisions must
+    not be force-closed on that hour. With a volume series that flips one coin in and out of the
+    top-2 every hour, the old code produced hourly round trips."""
+    prices, funding = _world(n_days=20)
+    prices[:] = 100.0
+    funding[:] = 0.0005                                             # everyone pays: all 'on'
+    idx = prices.index
+    rng = np.random.default_rng(7)
+    vol = pd.DataFrame({"AAA": 100.0, "BBB": 50.0 + rng.normal(0, 30, len(idx)), "CCC": 50.0 + rng.normal(0, 30, len(idx))}, index=idx)
+    p = CarryParams(lookback=3, universe_n=2, universe_exit_n=2, volume_window=1, max_assets=3)
+    w = build_weights(prices, funding, p, dollar_volume=vol)
+    changes = (w.diff().abs().sum(axis=1) > 0)
+    assert changes.iloc[48:].sum() > 0                              # the universe does move the book
+    hours = set(w.index[changes].hour)
+    assert hours <= {0, 8, 16}, sorted(hours)
+    assert changes.groupby(changes.index.date).sum().max() <= 3
