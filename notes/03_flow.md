@@ -1,6 +1,6 @@
 # Order-flow signals on binance perps, from our own book data
 
-> **Superseded.** The figures below came from about 7 hours of 1-minute bars per symbol, with sleep gaps, not the 21 hours stated (the script summed hours across the three symbols), and the strategy grid picked its best of 162 configurations in-sample. None of the t-statistics reaches 2. A rerun on a continuous multi-day sample with gap-aware features is due 27 Oct 2026; until then, treat nothing here as a result.
+> **Superseded.** The collector lost ~70% of its sample to host sleep; rerun on a continuous sample follows. (The "21 hours" below summed three symbols; it was about 7 hours each.)
 
 **One line:** on 21 hours of self-collected L2 snapshots and trades (BTC-PERP, ETH-PERP, SOL-PERP), top-of-book order-flow imbalance predicts the next 5-bar return with t = +1.8 and a top-minus-bottom decile spread of +11.1 bps; after 2 bps of cost per side the best one-feature strategy's edge survives.
 

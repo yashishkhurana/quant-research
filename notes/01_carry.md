@@ -80,7 +80,7 @@ Share of 8h windows below the default, per coin (≥ 30 windows in the cell), 95
 
 Below-default funding rose in every bucket and is monotone in liquidity in both periods. On the odds scale, the top 20 coins' odds of below-default funding rose 5.2× against 2.7× for the tail; the ratio, 1.91 (bootstrap 95% CI 1.41–2.62 over coins), says the most liquid coins moved further. This is consistent with delta-neutral capital crowding the liquid perps: the same trade this note studies, run at scale, pushing the perp below spot so that shorts pay longs.
 
-> **[YOUR ANSWER: alternative explanation]** Name at least one other mechanism that would produce this table (who else shorts the most liquid perps in 2025–26?) and say whether this data can tell it apart from crowding.
+The same table is also consistent with **hedging that is not carry**: holders of spot BTC, ETH and SOL (treasury companies, funds, miners, ETF-adjacent desks) shorting the liquid perps to hedge their inventory, and directional shorts concentrating in the most liquid contracts in a weak market. Both put persistent short pressure on exactly the coins in the top bucket. Funding data alone cannot separate them from delta-neutral carry; that would need positioning data (open interest and its growth against funding) or the disclosed books of known delta-neutral issuers. So this note claims consistency with crowding, not proof of it.
 
 ## Validation
 - **Out of sample:** the one rule chosen from the data (> 50% APR entry) was tested on the period split it was not tuned on and failed in 2025–26.
@@ -96,9 +96,9 @@ Below-default funding rose in every bucket and is monotone in liquidity in both 
 - **The opportunity shrank.** Above-default funding became ~20× rarer in 2025–26 across all settlement intervals, and below-default funding rose most in the coins with the most capacity.
 - **My first explanation was wrong.** 4h settlement does not explain shorter spells; the collapse is market-wide.
 
-> **[YOUR ANSWER: the other side]** If shorts pay longs on liquid coins ~72% of the time in 2025–26, why does nobody take the long-perp / short-spot side? One sentence.
+- **Why nobody takes the other side.** Collecting below-default funding means long perp and **short spot**, and shorting spot means borrowing the coin on margin; the borrow rate, its limited and recallable supply, and the small size of the shortfall below default (a few bps per window on majors) mean the reverse trade does not pay either, so the imbalance persists. Borrow costs were not measured here; that is the next thing to check before calling it closed.
 
-> **[YOUR ANSWER: what predicts below-default funding at decision time]** What observable would have warned you, and why is it only half an answer?
+- **What predicts below-default funding at decision time.** Liquidity: a coin in the top 20 by trailing volume was below default in ~72% of 2025–26 windows against ~37% for the tail, and that rank is known in advance. It is only half an answer because it says *where*, not *when*: it is a cross-sectional base rate, not a timing signal, and avoiding the liquid coins leaves the illiquid tail, where 7 bps per leg is optimistic, spot depth caps size, and delistings live.
 
 ## Reproduce
 ```bash
