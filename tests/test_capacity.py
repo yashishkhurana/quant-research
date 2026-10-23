@@ -89,3 +89,20 @@ def test_static_capacity_skips_unknown_caps_and_flags_them():
     assert np.allclose(static_capacity(w, cap), 1e7)      # B (no cap) is left out of the min, not a $0 cap
     assert uncapped_held(w, cap).tolist() == [True, False]
     assert uncapped_held(w * 0, cap).isna().all()          # flat bars: undefined
+
+
+def test_venue_leg_caps_use_oi_only_where_it_exists_and_cap_pairs_stays_neutral():
+    from qr.capacity import cap_pairs, venue_leg_caps
+    idx = _idx(1)[:2]
+    cols = pd.Index(["A-BN", "A-BY", "B-BN", "B-HL"])
+    adv_v = {"BN": pd.DataFrame({"A": 1e8, "B": 1e8}, index=idx), "BY": pd.DataFrame({"A": 1e8}, index=idx),
+             "HL": pd.DataFrame({"B": [np.nan, 5e7]}, index=idx)}
+    oi_v = {"BY": pd.DataFrame({"A": 1e7}, index=idx)}
+    cap = venue_leg_caps(cols, adv_v, oi_v, participation=0.02, oi_share=0.01)
+    assert np.allclose(cap["A-BN"], 2e6) and np.allclose(cap["A-BY"], 1e5)      # BY: 1% of 10m OI binds
+    assert np.isnan(cap["B-HL"].iloc[0]) and np.isclose(cap["B-HL"].iloc[1], 1e6)
+    w = pd.DataFrame({"A-BN": 0.1, "A-BY": -0.1, "B-BN": 0.1, "B-HL": -0.1}, index=idx)
+    c = cap_pairs(w, cap, book_size=1e7)                    # wants $1m per leg
+    assert np.allclose(c["A-BN"], -c["A-BY"]) and np.allclose(c["A-BY"], -0.01)  # BY cap 0.1m -> 0.01
+    assert (c[["B-BN", "B-HL"]].iloc[0] == 0).all()         # unknown HL cap: not traded
+    assert np.allclose(c[["B-BN", "B-HL"]].iloc[1].abs(), 0.1)                   # 1m cap, 1m wanted

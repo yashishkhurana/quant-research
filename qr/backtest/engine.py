@@ -73,8 +73,8 @@ def _metrics(r: pd.Series, equity: pd.Series, turnover: pd.Series, bpy: float) -
 def run(
     prices: pd.DataFrame,
     weights: pd.DataFrame,
-    fee_bps: float = 4.0,
-    slippage_bps: float = 2.0,
+    fee_bps: float | pd.Series = 4.0,
+    slippage_bps: float | pd.Series = 2.0,
     funding: pd.DataFrame | None = None,
     max_gross: float | None = None,
     rebalance_band: float = 0.0,
@@ -88,6 +88,8 @@ def run(
     `rebalance_bars`: optional bool per bar. On False bars the book holds its drifted weights and
     only trades forced exits (target 0) and sign flips; on True bars it goes to target (subject to
     the band). None = every bar is a rebalance bar.
+    `fee_bps` / `slippage_bps`: a number, or a Series per price column (e.g. per venue); columns
+    missing from the Series pay 0.
     """
     prices = prices.sort_index()
     weights = weights.reindex(index=prices.index, columns=prices.columns).fillna(0.0)
@@ -118,7 +120,9 @@ def run(
     held = np.zeros(n_assets)                            # realised weights held into bar t
     gross_r = np.zeros(n_bars); turnover = np.zeros(n_bars); fund = np.zeros(n_bars)
     realised = np.zeros_like(W); traded = np.zeros_like(W)
-    rate = (fee_bps + slippage_bps) / 1e4
+    def _per_col(x):
+        return x.reindex(prices.columns).fillna(0.0).values if isinstance(x, pd.Series) else x
+    rate = (_per_col(fee_bps) + _per_col(slippage_bps)) / 1e4    # scalar, or one rate per column
     for t in range(n_bars):
         r = rets[t]
         g = float(held @ r)                              # portfolio return over bar t
@@ -140,7 +144,7 @@ def run(
         held = new
         realised[t] = new
 
-    cost = turnover * rate
+    cost = traded @ rate if np.ndim(rate) else turnover * rate
     net = gross_r - cost + fund
     net[0] = 0.0
     idx = prices.index

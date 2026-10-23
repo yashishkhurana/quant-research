@@ -98,3 +98,14 @@ def test_rebalance_bars_hold_drift_between_rebalances():
     prices2 = prices.copy(); prices2.loc[idx[4]:, "B"] = np.nan
     res2 = run(prices2, w, fee_bps=0, slippage_bps=0, rebalance_bars=rb)
     assert res2.weights["B"].iloc[4] == 0 and res2.turnover.iloc[4] > 0
+
+
+def test_per_column_fees_charge_each_column_its_own_rate():
+    p = _prices(50)
+    w = pd.DataFrame({"A": 0.5, "B": -0.5}, index=p.index)
+    flat = run(p, w, fee_bps=4.0, slippage_bps=0.0)
+    per = run(p, w, fee_bps=pd.Series({"A": 4.0, "B": 4.0}), slippage_bps=0.0)
+    assert np.allclose(flat.costs, per.costs)                        # same rate either way
+    mixed = run(p, w, fee_bps=pd.Series({"A": 2.0, "B": 6.0}), slippage_bps=1.0)
+    exp = (mixed.trades["A"] * 3.0 + mixed.trades["B"] * 7.0) / 1e4
+    assert np.allclose(mixed.costs, exp)

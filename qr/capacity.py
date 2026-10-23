@@ -117,3 +117,43 @@ def deployed_share(capped: pd.DataFrame, target: pd.DataFrame) -> pd.Series:
     """Gross exposure actually held over gross exposure wanted, per bar; NaN when flat."""
     g_t = target.abs().sum(axis=1)
     return (capped.abs().sum(axis=1) / g_t.where(g_t > 0))
+
+
+# --- multi-venue -------------------------------------------------------------------------------
+
+def venue_leg_caps(columns: pd.Index, adv_by_venue: dict[str, pd.DataFrame], oi_by_venue: dict[str, pd.DataFrame],
+                   participation: float, oi_share: float) -> pd.DataFrame:
+    """Cap per engine column '<COIN>-<VENUE>' = min(participation x that venue's ADV,
+    oi_share x that venue's open interest). The OI term applies only where the venue has OI
+    history (Bybit); elsewhere the cap is volume-only and OI is a snapshot check. NaN where the
+    venue has no volume history for the coin (e.g. Hyperliquid before its ~7 months of candles):
+    unknown, so cap_pairs will not size it."""
+    idx = next(iter(adv_by_venue.values())).index
+    out = pd.DataFrame(np.nan, index=idx, columns=columns)
+    for c in columns:
+        coin, v = c.rsplit("-", 1)
+        a = adv_by_venue.get(v)
+        if a is None or coin not in a.columns:
+            continue
+        cap = participation * a[coin].reindex(idx)
+        oi = oi_by_venue.get(v)
+        if oi is not None and coin in oi.columns:
+            o = oi_share * oi[coin].reindex(idx)
+            cap = np.fmin(cap, o).where(cap.notna())             # OI tightens where known; never loosens
+        out[c] = cap
+    return out
+
+
+def cap_pairs(weights: pd.DataFrame, leg_cap: pd.DataFrame, book_size: float) -> pd.DataFrame:
+    """Clip each coin's held legs by ONE factor, the tightest leg's cap / (B |w|), so a pair stays
+    neutral. A held leg with an unknown (NaN) cap gets factor 0: not sized, not traded."""
+    w = weights.copy()
+    cap = leg_cap.reindex(index=w.index, columns=w.columns)
+    lim = (cap / (book_size * w.abs())).where(w != 0)
+    lim = lim.where(~(cap.isna() & (w != 0)), 0.0).clip(upper=1.0)
+    coins = sorted({c.rsplit("-", 1)[0] for c in w.columns})
+    for coin in coins:
+        legs = [c for c in w.columns if c.rsplit("-", 1)[0] == coin]
+        f = lim[legs].min(axis=1, skipna=True).fillna(1.0)
+        w[legs] = w[legs].mul(f, axis=0)
+    return w
