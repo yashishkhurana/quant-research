@@ -22,7 +22,10 @@ def deflated_sharpe(returns: pd.Series, n_trials: int, bars_per_year: float,
     skew, kurt = stats.skew(r), stats.kurtosis(r, fisher=False)
     var_sr = var_trials if var_trials is not None else 1.0 / T
     # expected max Sharpe of n_trials zero-skill trials (Euler–Mascheroni approximation)
-    e_max = np.sqrt(var_sr) * ((1 - 0.5772) * stats.norm.ppf(1 - 1 / n_trials) + 0.5772 * stats.norm.ppf(1 - 1 / (n_trials * np.e)))
+    if n_trials <= 1:                                      # single trial: plain PSR against sr_benchmark
+        e_max = 0.0
+    else:
+        e_max = np.sqrt(var_sr) * ((1 - 0.5772) * stats.norm.ppf(1 - 1 / n_trials) + 0.5772 * stats.norm.ppf(1 - 1 / (n_trials * np.e)))
     sr0 = max(sr_benchmark / np.sqrt(bars_per_year), e_max)
     z = (sr - sr0) * np.sqrt(T - 1) / np.sqrt(1 - skew * sr + (kurt - 1) / 4 * sr ** 2)
     return {"sharpe_ann": float(sr * np.sqrt(bars_per_year)), "sr0_ann": float(sr0 * np.sqrt(bars_per_year)),

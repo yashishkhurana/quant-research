@@ -73,7 +73,10 @@ def main(a):
     univ = (dvol.notna() & (dvol.rolling(base.volume_window, min_periods=base.volume_window // 4).sum() > 0)).sum(axis=1)
     m_extra = {"assets_with_data": int(len(funding.columns)), "universe_n": a.universe_n,
                "avg_assets_eligible": float(univ.mean()),
-               "n_delisted_in_sample": int((prices.filter(like="-PERP").notna().iloc[-1] == False).sum())}
+               # delisted = last valid perp price more than 7 days before the end of the sample
+               # (the final bar is incomplete for nearly every symbol, so "NaN on the last bar" is wrong)
+               "n_delisted_in_sample": int((prices.filter(like="-PERP").apply(lambda c: c.last_valid_index())
+                                             < prices.index[-1] - pd.Timedelta(days=7)).sum())}
     tearsheet(res, "Funding carry, base params", out=OUT / "tearsheet.png")
     lev = implied_leverage(res)
     m = dict(res.metrics); m.update(m_extra)
@@ -117,6 +120,12 @@ def main(a):
     per_bar_sr = pd.Series([t.mean() / t.std(ddof=1) for t in trials])
     dsr = deflated_sharpe(res.returns, n_trials=len(trials), bars_per_year=res.bars_per_year,
                           var_trials=float(per_bar_sr.var()))
+    # The grid's trials are not exchangeable noise draws: their Sharpes differ mainly because they
+    # trade different amounts and pay different costs, so the deflation benchmark built from their
+    # spread is reported but not relied on. The probabilistic Sharpe against zero is reported beside it.
+    psr0 = deflated_sharpe(res.returns, n_trials=1, bars_per_year=res.bars_per_year, var_trials=0.0)
+    m["psr_vs_zero"] = psr0["psr"]
+    m["grid_sharpe_min"] = float(np.nanmin(tbl.values)); m["grid_sharpe_max"] = float(np.nanmax(tbl.values))
     m.update({f"dsr_{k}": v for k, v in dsr.items()})
 
     # walk-forward: refit (lookback, entry) on 6 months, trade next 2 months
@@ -222,7 +231,7 @@ The unhedged book can also trade the {m['n_perp_only']} contracts that never had
 ![unhedged](../reports/carry/tearsheet_unhedged.png)
 
 ## Validation
-{len(tbl.values.ravel())} parameter combinations were tried. Deflated Sharpe: probability the base-case Sharpe beats the expected best of {m['dsr_n_trials']} zero-skill trials is {m['dsr_psr']:.0%} (benchmark Sharpe after deflation {f2(m['dsr_sr0_ann'])}). Walk-forward, refitting lookback and threshold on six months and trading the next two ({m.get('wf_untradeable_folds', 0)} folds where no parameter set traded in-sample, run on base parameters): out-of-sample Sharpe {f2(m.get('wf_sharpe', float('nan')))}, annualised return {pct(m.get('wf_ann_return', float('nan')))}, max drawdown {pct(m.get('wf_max_dd', float('nan')))} over {m.get('wf_bars', 0)} hours.
+{len(tbl.values.ravel())} parameter combinations were tried. Grid Sharpe ranges {f2(m['grid_sharpe_min'])} to {f2(m['grid_sharpe_max'])}. Probability the base-case Sharpe is above zero: {m['psr_vs_zero']:.0%}. Deflated Sharpe against the grid's spread: benchmark {f2(m['dsr_sr0_ann'])}, probability {m['dsr_psr']:.0%}; the trials differ mainly in how much they trade, not in sampling noise, so this benchmark is reported for completeness and not relied on. Walk-forward, refitting lookback and threshold on six months and trading the next two ({m.get('wf_untradeable_folds', 0)} folds where no parameter set traded in-sample, run on base parameters): out-of-sample Sharpe {f2(m.get('wf_sharpe', float('nan')))}, annualised return {pct(m.get('wf_ann_return', float('nan')))}, max drawdown {pct(m.get('wf_max_dd', float('nan')))} over {m.get('wf_bars', 0)} hours.
 
 ## What broke
 - Funding income arrives in discrete 8h lumps while the spot/perp basis moves continuously; most of the drawdown is basis, not funding turning negative. The hedge is not free in a squeeze.
