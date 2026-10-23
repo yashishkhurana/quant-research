@@ -29,10 +29,15 @@ def _path(layer: str, exchange: str, dataset: str, symbol: str, day: str) -> Pat
 
 
 def _write(df: pd.DataFrame, p: Path) -> None:
+    """Atomic: write a temp file in the same directory, then rename over the target. A reader (or a
+    crash) mid-write sees the old complete file, never a truncated one; the collector rewrites the
+    whole day file on every flush, so a non-atomic write could lose the day."""
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
     if _EXT == ".parquet":
-        df.to_parquet(p)
+        df.to_parquet(tmp)
     else:
-        df.to_csv(p)
+        df.to_csv(tmp)
+    os.replace(tmp, p)
 
 
 def _read(p: Path) -> pd.DataFrame:
