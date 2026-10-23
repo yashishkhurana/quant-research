@@ -2,7 +2,7 @@
 
 *The first of a planned set of notes on Binance perps. It tests the simplest delta-neutral carry book before anything is built on top of it, and it rules it out.*
 
-**One line:** hedged funding carry (long spot / short perp) on Binance does not pay after costs in 2023–26: rotating into high-funding coins spends the income on turnover, holding liquid coins at the default rate loses −4.3% a year because below-default funding outweighs it, and the above-default spells that funded the trade in 2023–24 became about 20× rarer in 2025–26, with the most liquid coins hit hardest.
+**One line:** hedged funding carry (long spot / short perp) on Binance does not pay after costs in 2023–26: rotating into high-funding coins spends the income on turnover, holding liquid coins at the default rate loses −4.3% a year because below-default funding outweighs it, and the above-default spells that funded the trade in 2023–24 became about 20× rarer in 2025–26, with the most liquid coins hit hardest. The coins that could hold $2.5m per leg, about seven at a time, paid above-default funding in under 1% of 2025–26 windows: the premium and the capacity are in different coins.
 
 ## Hypothesis
 When leveraged longs crowd a perp, it trades above spot and longs pay shorts funding. A short perp hedged with long spot collects that funding without directional exposure. The edge is a premium for taking the other side of leverage demand, so it should exist only while that demand outweighs the capital willing to supply it.
@@ -17,7 +17,7 @@ Binance's funding has a floor-like default: an interest component of 0.01% per 8
 - Binance keeps serving perp klines after a contract is delisted, with a frozen close. Perp prices are cut at each contract's delisting time (Binance's `deliveryDate`, 134 contracts), so a delisting force-closes the position in the backtester instead of leaving a frozen perp hedged against live spot.
 
 ## Method
-Three studies, each answering one question, plus a rotation backtest (`scripts/run_carry.py`, results 1 and 1b), listed under Reproduce:
+Three studies, each answering one question, plus a rotation backtest (`scripts/run_carry.py`, results 1 and 1b) and a capacity section with its own scripts, all listed under Reproduce:
 
 1. **Persistence** (`scripts/funding_persistence.py`): a *spell* is a run of consecutive 8h windows with funding strictly above the default. Trade per spell: enter at the end of the first window above default (when it is known), earn from the next window, exit at the end of the first window back at or below default. Compared with a 28 bps round trip (4 legs × (4 bps fee + 3 bps slippage)). Funding only; basis PnL excluded.
 2. **Default-rate carry** (`scripts/default_carry.py`): at each month start, the top 20 hedgeable coins by trailing volume, equal weight, +1/20 spot and −1/20 perp (2.0× gross), held through the month (drift not traded; delistings exit both legs). Full engine accounting: price and basis PnL, funding, 7 bps per leg. Funding is attributed to settlements at, above and below their interval's default.
@@ -110,14 +110,53 @@ Below-default funding rose in every bucket and is monotone in liquidity in both 
 
 The same table is also consistent with **hedging that is not carry**: holders of spot BTC, ETH and SOL (treasury companies, funds, miners, ETF-adjacent desks) shorting the liquid perps to hedge their inventory, and directional shorts concentrating in the most liquid contracts in a weak market. Both put persistent short pressure on exactly the coins in the top bucket. Funding data alone cannot separate them from delta-neutral carry; that would need positioning data (open interest and its growth against funding) or the disclosed books of known delta-neutral issuers. So this note claims consistency with crowding, not proof of it.
 
+## Capacity
+How large can a hedged book get before it is the market in the coins it holds? A name's cap is a participation rate times its trailing 30-day dollar volume, taking the smaller of the perp and spot legs, on completed bars only (`qr/capacity.py`). Binance serves no open-interest history, so open interest enters only as a dated snapshot.
+
+**The coins that can hold size do not pay.** Coins that could each take $2.5m per leg at 2% of volume, re-evaluated at every 8h window, 2025-01 to 2026-10, funding only (`scripts/sizable_funding.py`):
+
+| Coins | Per window (median) | Below / at / above default | Mean funding (APR) |
+| --- | --- | --- | --- |
+| Can hold $2.5m per leg (point in time) | 7 (range 2–28) | 75.4% / 23.8% / **0.7%** | −9.1% |
+| Same, filtered on the 23 Oct OI snapshot instead | 6 | 75.8% / 24.1% / 0.1% | +0.3% |
+| All other hedgeable coins | 359 | 44.1% / 54.7% / 1.2% | −13.3% |
+
+The sizable coins are mostly ETH, BTC, SOL, XRP, BNB, DOGE and SUI. A $25m hedged book at 2× gross needs about ten names at $2.5m a leg; there are about seven, and they sit below the default three quarters of the time. At size the trade becomes the default-rate book of section 2, which lost 4.3% a year. The point-in-time filter and the snapshot filter agree, so the result does not depend on choosing coins by today's open interest.
+
+**What the signal's own book can hold.** Static capacity is the largest book at which every held name stays inside its cap (the minimum over held names of cap / weight), over the bars the rotation book is invested:
+
+| Hedged, 2% of volume | 2023 | 2024 | 2025 | 2026 | All |
+| --- | --- | --- | --- | --- | --- |
+| Median | $1.4m | $4.8m | $3.4m | $1.1m | **$2.4m** |
+| 10th–90th percentile | $0.7–3.8m | $2.0–11.7m | $1.7–6.8m | $0.7–2.3m | $0.9–7.5m |
+
+The median is $1.2m at 1% of volume and $6.1m at 5%, linear in the participation rate by construction. Capacity peaked in 2024 and in 2026 is about a quarter of that: as the premium moved into smaller coins, the book followed it into coins that cannot hold size. The book holds a coin in its first week as a tradeable pair (too new to have a volume record, so no cap) on about 9% of bars, but those positions are about 1% of its exposure and 2–3% of its funding, so they barely move the figure. The unhedged book's median is $18m at 2% of volume, but its perp-only holdings are where the volume cap is least reliable (below).
+
+**Impact.** The capacity curve (`scripts/run_capacity.py`, `reports/carry/capacity_curve.png`) runs the capped book from $1m to $100m and charges square-root impact on every trade (coefficient 1, on top of the flat 7 bps). No size is positive, hedged or unhedged. At $1m and 2% of volume, impact alone costs the hedged book about 100% a year at 376× turnover, against 11% of funding. Losses shrink at larger sizes only because the caps leave most of the capital idle (35% deployed at $25m). The coefficient is a rough convention, but the conclusion does not depend on it: the book already loses at the flat 7 bps.
+
+**Open-interest check on the current book.** Target weights held in the seven days to 23 Oct 2026, against open interest on 23 Oct (`scripts/oi_check.py`):
+
+| Held name | Share of the week held | Volume / OI | Book at 1% of OI | Book at 2% of volume |
+| --- | --- | --- | --- | --- |
+| LSK | 28% | 9.3 | $0.34m | $0.64m |
+| MARSCOIN | 98% | 4.0 | $0.83m | $1.8m |
+| MUBARAK | 98% | 4.0 | $1.06m | $1.6m |
+| 牛来 | 19% | 2.1 | $1.11m | $1.16m |
+| STRK | 34% | 7.9 | $1.7m | $3.1m |
+| PUMP | 86% | 3.7 | $5.1m | $4.9m |
+| PAXG | 28% | 0.6 | $7.8m | $1.9m |
+| ZEC | 86% | 3.4 | $37m | $31m |
+
+The book's size is set by its least liquid holding, and the signal's holdings are small: LSK, MARSCOIN, MUBARAK and STRK each cap the hedged book at $0.3–1.7m before the position is 1% of the contract's open interest, and only ZEC could take eight figures. Open interest is the tighter limit for five of the eight hedged names and ten of the thirteen unhedged ones (`scripts/oi_check.py`, `reports/carry/oi_check_*.csv`); for perp-only coins whose daily volume is many times their open interest (US, 龙虾, BR) the volume cap overstates capacity 26–37×, so the unhedged $18m is an upper bound. This is one week of target holdings against one day of open interest and cannot be run over the backtest; at size the book's own short would also be part of the open interest it is measured against.
+
 ## Validation
 - **Out of sample:** the one rule chosen from the data (> 50% APR entry) was tested on the period split it was not tuned on and failed in 2025–26.
 - **Survivorship:** the universe is every listed contract, including 89 hedgeable delisted coins; liquidity is ranked point in time. An earlier version that used today's top 40 by volume was discarded for selecting on survival.
 - **Unit check:** default per settlement verified per interval (0.01% at 8h, 0.005% at 4h, 0.00125% at 1h) before attributing funding; funding attribution sums exactly to the engine's funding PnL.
 - **Robustness:** the volume-bucket ordering is unchanged when coins that passed briefly through a bucket are dropped; bootstrap CIs resample coins, the independent unit.
 - **Multiple testing:** 6 of the 25 rotation cells are positive. The best (lookback 21, entry 20% APR, Sharpe 0.49) has a 79% probability of a Sharpe above zero taken alone and 19% after deflating for 25 trials against a zero-skill benchmark (the best of 25 skill-less strategies would be expected to show a Sharpe of about 1.0).
-- **Controls:** the unhedged result was checked against the same book without its stop and against a no-signal short of the same universe at matched gross (section 1b).
-- **Not done:** the persistence study is funding only (no basis PnL); 7 bps per leg is optimistic for small-cap spot.
+- **Controls:** the unhedged result was checked against the same book without its stop and against a no-signal short of the same universe at matched gross (section 1b); the capacity result was checked with a point-in-time filter and a snapshot filter that agree.
+- **Not done:** the persistence study is funding only (no basis PnL); 7 bps per leg is optimistic for small-cap spot; capacity is a volume cap with square-root impact, not a fill simulation.
 
 ## What broke
 - **Rotation spends the carry on turnover.** Re-ranking every 8h swaps about one position every one to two settlements; each swap costs ~28 bps against a fraction of a basis point of extra carry per window, and the break-even (~51 days for a 2% APR gap) is longer than almost every spell.
@@ -135,11 +174,15 @@ The same table is also consistent with **hedging that is not carry**: holders of
 ## Reproduce
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]" && pytest                  # 38 tests
+pip install -e ".[dev]" && pytest                  # 45 tests
 bash scripts/fetch_carry_data.sh 2023-01-01        # universe + funding + hourly perp/spot (~1–2 h)
 # the first study run builds the funding and price matrices in data/processed/ (~15 min, once)
 python scripts/funding_persistence.py              # study 1
 python scripts/default_carry.py --n 20             # study 2 -> reports/default_carry/
 python scripts/funding_by_volume.py --min-windows 30   # study 3
 python scripts/run_carry.py --end 2026-10-23       # rotation, grid, walk-forward, unhedged 2x2 (~40 min)
+python scripts/fetch_oi_snapshot.py                # today's open interest (dated; needs network)
+python scripts/sizable_funding.py                  # capacity: funding in coins that can hold $2.5m a leg
+python scripts/run_capacity.py                     # static capacity and capacity curve
+python scripts/oi_check.py                         # current holdings vs the OI snapshot
 ```

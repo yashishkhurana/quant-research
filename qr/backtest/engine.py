@@ -37,6 +37,7 @@ class Result:
     weights: pd.DataFrame         # realised weights after force-closes
     bars_per_year: float
     metrics: dict = field(default_factory=dict)
+    trades: pd.DataFrame | None = None   # per-asset |dw| actually traded each bar (sums to turnover)
 
 
 def infer_bars_per_year(index: pd.DatetimeIndex) -> float:
@@ -116,7 +117,7 @@ def run(
 
     held = np.zeros(n_assets)                            # realised weights held into bar t
     gross_r = np.zeros(n_bars); turnover = np.zeros(n_bars); fund = np.zeros(n_bars)
-    realised = np.zeros_like(W)
+    realised = np.zeros_like(W); traded = np.zeros_like(W)
     rate = (fee_bps + slippage_bps) / 1e4
     for t in range(n_bars):
         r = rets[t]
@@ -134,7 +135,8 @@ def run(
             new = np.where(must, target, drifted)
         else:
             new = target
-        turnover[t] = float(np.abs(new - drifted).sum())
+        traded[t] = np.abs(new - drifted)
+        turnover[t] = float(traded[t].sum())
         held = new
         realised[t] = new
 
@@ -146,7 +148,8 @@ def run(
     bpy = infer_bars_per_year(idx)
     res = Result(net_r, pd.Series(gross_r, index=idx), equity, pd.Series(turnover, index=idx),
                  pd.Series(cost, index=idx), pd.Series(fund, index=idx),
-                 pd.DataFrame(realised, index=idx, columns=prices.columns), bpy)
+                 pd.DataFrame(realised, index=idx, columns=prices.columns), bpy,
+                 trades=pd.DataFrame(traded, index=idx, columns=prices.columns))
     res.metrics = _metrics(net_r, equity, res.turnover, bpy)
     res.metrics["cost_drag_ann"] = float(cost.mean() * bpy)
     res.metrics["funding_ann"] = float(fund.mean() * bpy)
