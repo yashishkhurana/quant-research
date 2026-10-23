@@ -171,13 +171,14 @@ def kill_mask(returns: pd.Series, p: CarryParams, active: np.ndarray | None = No
 
 def run_with_risk(prices: pd.DataFrame, funding_rates: pd.DataFrame, p: CarryParams,
                   fee_bps: float = 4.0, slippage_bps: float = 3.0, max_iter: int = 8,
-                  dollar_volume: pd.DataFrame | None = None):
+                  dollar_volume: pd.DataFrame | None = None, weights: pd.DataFrame | None = None):
     """Full pipeline: weights -> engine -> kill-switch -> engine, until the flat mask stops growing.
-    funding_rates columns = base symbols; mapped onto the perp columns for the engine."""
+    funding_rates columns = base symbols; mapped onto the perp columns for the engine.
+    `weights`: precomputed target weights (e.g. capacity-capped); default = build_weights."""
     from qr.backtest.engine import run
 
     f_perp = funding_rates.rename(columns={b: f"{b}-PERP" for b in funding_rates.columns})
-    w = build_weights(prices, funding_rates, p, dollar_volume)
+    w = build_weights(prices, funding_rates, p, dollar_volume) if weights is None else weights
     kw = dict(fee_bps=fee_bps, slippage_bps=slippage_bps, funding=f_perp, max_gross=p.max_gross,
               rebalance_band=p.rebalance_band)
     res = run(prices, w, **kw)

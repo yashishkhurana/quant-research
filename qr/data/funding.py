@@ -55,7 +55,10 @@ def load_funding(bases: list[str], start: str, end: str, cache: bool = True) -> 
 
 def per_window(raw: pd.DataFrame) -> pd.DataFrame:
     """Funding paid per fixed 8h window, summed over the settlements inside it. NaN where the
-    coin had no settlement in the window (before listing, after delisting)."""
+    coin had no settlement in the window (before listing, after delisting).
+    Timestamps are rounded to the minute first: Binance's fundingTime carries ms jitter, and with
+    closed='right' an 08:00:00.008 settlement would fall into the window ending 16:00."""
+    raw = raw.copy(); raw.index = raw.index.round("min")
     g = raw.resample(WINDOW, label="right", closed="right")
     out = g.sum(min_count=1)
     return out

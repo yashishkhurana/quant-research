@@ -10,14 +10,14 @@ When leveraged longs crowd a perp, it trades above spot and longs pay shorts fun
 Binance's funding has a floor-like default: an interest component of 0.01% per 8h (≈10.95% APR) that the rate sits at whenever the perp premium is small. So there are two distinct trades: collecting spikes **above** the default, and simply holding coins **at** the default.
 
 ## Data
-- Binance USDT-M perps and Binance spot, hourly closes; funding from the fapi funding endpoint. 2023-01-01 to 2026-10-21.
+- Binance USDT-M perps and Binance spot, hourly closes; funding from the fapi funding endpoint. Funding 2023-01-01 to 2026-10-21, hourly prices to 2026-10-23.
 - Universe: every USDT perp Binance has listed (655, including 133 delisted). 447 have a spot market and so can be hedged; 89 of those are delisted contracts (FTT, FTM, WAVES, MKR, OCEAN, AGIX, …), so the sample includes the casualties. Perp-only coins are excluded from every hedged study.
 - Settlement intervals differ: at the end of the sample 509 coins settle every 4h, 134 every 8h, 12 every 1–2h, and 169 dropped to 1h at some point (Binance does this when funding is at its cap). All funding is put on fixed 8h UTC windows by summing the settlements inside each window (`qr/data/funding.py`); the default is 0.01% per 8h window at every interval (0.005% per 4h settlement, 0.00125% per 1h).
 - Liquidity is point in time: trailing 30-day perp dollar volume on completed bars only.
 - Binance keeps serving perp klines after a contract is delisted, with a frozen close. Perp prices are cut at each contract's delisting time (Binance's `deliveryDate`, 134 contracts), so a delisting force-closes the position in the backtester instead of leaving a frozen perp hedged against live spot.
 
 ## Method
-Three studies, each answering one question:
+Three studies, each answering one question, plus a rotation backtest (`scripts/run_carry.py`, results 1 and 1b), listed under Reproduce:
 
 1. **Persistence** (`scripts/funding_persistence.py`): a *spell* is a run of consecutive 8h windows with funding strictly above the default. Trade per spell: enter at the end of the first window above default (when it is known), earn from the next window, exit at the end of the first window back at or below default. Compared with a 28 bps round trip (4 legs × (4 bps fee + 3 bps slippage)). Funding only; basis PnL excluded.
 2. **Default-rate carry** (`scripts/default_carry.py`): at each month start, the top 20 hedgeable coins by trailing volume, equal weight, +1/20 spot and −1/20 perp (2.0× gross), held through the month (drift not traded; delistings exit both legs). Full engine accounting: price and basis PnL, funding, 7 bps per leg. Funding is attributed to settlements at, above and below their interval's default.
@@ -47,9 +47,34 @@ The rule *enter above 50% APR, hold until back at default* was chosen from this 
 
 Spells also became rarer. The share of listed coin-windows above default fell about 20× for both settlement intervals (8h coins 13.9% → 0.7%, 4h coins 25.2% → 1.4%), while the number of listed hedgeable coins rose from 218 to 365. My first explanation, that 4h settlement shortened spells, is rejected: within each period 4h coins have slightly *longer* spells than 8h coins (2025–26 mean 2.5 vs 2.0 windows), and 8h coins, which never changed interval, collapsed just as much.
 
-The rotation backtest shows the same thing in PnL. Book: top 10 by trailing 9-window funding among the top 40 by trailing volume, entry above 10% APR and exit below 3%, decisions at 8h window ends, 25% no-trade band, 8% drawdown kill switch, 2.0× gross, 7 bps per leg. It collected **+11.7% a year in funding and paid −35.8% a year in costs**: net −20.7% a year, Sharpe −6.8, max drawdown −58.7%, turnover 511× a year, almost all of it from selection changes (0.061 per bar from target changes against 0.058 total). All 25 parameter combinations are negative (Sharpe −18.2 to −0.3), and walk-forward out of sample returns −3.1% a year. The unhedged version (short perp only, perp-only coins allowed) roughly breaks even (−0.03% a year) with a −78% max drawdown and a −20% worst week (week ending 2025-10-12).
+> *Corrected 2026-10-23.* An earlier version of this paragraph read raw Binance funding timestamps, which carry millisecond jitter (08:00:00.008). About a third of settlements fell into the following 8h window, which misaligned the rotation signal by one window for those settlements and made it trade more than it should. With timestamps rounded to the minute, the rotation result moved from −20.7% to −13.4% a year and the unhedged result from −0.03% to +23.3% (section 1b). Studies 1–3 already used rounded timestamps and are unchanged.
+
+The rotation backtest shows the same thing in PnL. Book: top 10 by trailing 9-window funding among the top 40 by trailing volume, entry above 10% APR and exit below 3%, decisions at 8h window ends, 25% no-trade band, 8% drawdown kill switch, 2.0× gross, 7 bps per leg. It collected **+11.4% a year in funding and paid −26.3% a year in costs**: net −13.4% a year, Sharpe −4.2, max drawdown −42.3%, turnover 376× a year, almost all of it from selection changes (0.044 per bar from target changes against 0.043 traded; the no-trade band absorbs the difference). Six of the 25 parameter combinations have a positive Sharpe, all in the slowest-trading corner of the grid (entry 15–30% APR, lookback 9–21 windows); the best is 0.49, with a 79% probability of being above zero taken alone and 19% after deflating for 25 trials. Walk-forward out of sample returns −0.1% a year (Sharpe −0.03). The cells that stop losing are the ones that trade least, and once the rule trades that little nothing is left over: the loss is in the trading rule, and the signal is worth about zero after costs.
 
 ![rotation carry](../reports/carry/tearsheet.png)
+
+### 1b. The unhedged book's return is its stop, not its carry
+The same signal as a short-perp-only book (perp-only coins allowed) returns +23.3% a year, Sharpe 0.65, with a −77% max drawdown and a −19% worst week (week ending 2025-10-12). Four runs separate the signal from the 8% drawdown stop. The control is an equal-weight short of the same point-in-time top-40 universe with no funding signal, at the same average gross (0.95), decision clock and costs:
+
+| Book | Stop | Price / yr | Funding / yr | Costs / yr | Net / yr | Max DD | Stop events |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Carry signal | 8% DD | +51.3% | +10.5% | −14.6% | **+23.3%** | −77% | 177 |
+| Carry signal | none | +4.2% | +20.6% | −14.3% | **−34.3%** | −94% | 0 |
+| No signal, short top 40 | 8% DD | +49.5% | −12.6% | −5.4% | **+15.0%** | −57% | 127 |
+| No signal, short top 40 | none | +13.3% | −16.2% | −1.4% | **−26.6%** | −84% | 0 |
+
+(Price, funding and costs are simple annual sums; net is compounded.)
+
+Removing the stop turns +23% into −34%, and the plain short of the same universe does nearly as well with the stop (+15%) and also loses without it (−27%). The signal is worth about +8 points a year with the stop and −8 without it, which is indistinguishable from zero. On a book with about 72% annual volatility an 8% stop fired 177 times and behaved like a trend filter, flat after each squeeze and back in after the 72-hour cooldown; the full-sample number records when it happened to fire, and it is not stable (the no-signal short with the stop returns +16% at gross 1.0 and −7% at 0.55). The stop also reverses the carry: flat about 40% of the time, the book collects half the funding while every stop and re-entry is a full round trip, so funding (+10.5%) no longer covers costs (−14.6%).
+
+| Year | Price | Funding | Costs | Net (compounded) |
+| --- | --- | --- | --- | --- |
+| 2023 | −9.8% | +8.6% | −15.5% | −29.3% |
+| 2024 | −13.7% | +10.4% | −16.6% | −37.1% |
+| 2025 | +140.8% | +7.8% | −13.5% | +178.8% |
+| 2026 (to Oct) | +78.1% | +13.0% | −10.2% | +79.2% |
+
+On 1 January 2025 the book was down about 55% from its start. The two years that pay come after the two that would have shut it down.
 
 ### 2. Holding liquid coins at the default does not pay either
 
@@ -90,7 +115,9 @@ The same table is also consistent with **hedging that is not carry**: holders of
 - **Survivorship:** the universe is every listed contract, including 89 hedgeable delisted coins; liquidity is ranked point in time. An earlier version that used today's top 40 by volume was discarded for selecting on survival.
 - **Unit check:** default per settlement verified per interval (0.01% at 8h, 0.005% at 4h, 0.00125% at 1h) before attributing funding; funding attribution sums exactly to the engine's funding PnL.
 - **Robustness:** the volume-bucket ordering is unchanged when coins that passed briefly through a bucket are dropped; bootstrap CIs resample coins, the independent unit.
-- **Not done:** no deflated Sharpe, because there is no positive strategy to deflate; the persistence study is funding only (no basis PnL); 7 bps per leg is optimistic for small-cap spot.
+- **Multiple testing:** 6 of the 25 rotation cells are positive. The best (lookback 21, entry 20% APR, Sharpe 0.49) has a 79% probability of a Sharpe above zero taken alone and 19% after deflating for 25 trials against a zero-skill benchmark (the best of 25 skill-less strategies would be expected to show a Sharpe of about 1.0).
+- **Controls:** the unhedged result was checked against the same book without its stop and against a no-signal short of the same universe at matched gross (section 1b).
+- **Not done:** the persistence study is funding only (no basis PnL); 7 bps per leg is optimistic for small-cap spot.
 
 ## What broke
 - **Rotation spends the carry on turnover.** Re-ranking every 8h swaps about one position every one to two settlements; each swap costs ~28 bps against a fraction of a basis point of extra carry per window, and the break-even (~51 days for a 2% APR gap) is longer than almost every spell.
@@ -98,6 +125,8 @@ The same table is also consistent with **hedging that is not carry**: holders of
 - **The default is not free.** Holding liquid coins at the default earns ~4% a year from default settlements and gives back ~11% to below-default ones.
 - **The opportunity shrank.** Above-default funding became ~20× rarer in 2025–26 across all settlement intervals, and below-default funding rose most in the coins with the most capacity.
 - **My first explanation was wrong.** 4h settlement does not explain shorter spells; the collapse is market-wide.
+- **A timestamp bug inflated the rotation's losses.** The rotation script read raw funding times, which carry millisecond jitter; with 8h windows closed on the right, a 08:00:00.008 settlement landed in the window ending 16:00. About a third of settlements were misaligned, the signal churned, and turnover was 511× a year instead of 376×. It was found when the capacity study, which loaded funding through the rounded loader, could not reproduce the note's baseline; the two loaders now agree to four decimals and `per_window` rounds timestamps itself.
+- **The unhedged book's risk layer was its strategy.** An 8% drawdown stop built for a hedged book fired 177 times on a 72%-vol short book and produced the whole of its +23%; without the stop the same book loses 34% a year.
 
 - **Why nobody takes the other side.** Collecting below-default funding means long perp and **short spot**, and shorting spot means borrowing the coin on margin; the borrow rate, its limited and recallable supply, and the small size of the shortfall below default (a few bps per window on majors) mean the reverse trade does not pay either, so the imbalance persists. Borrow costs were not measured here; that is the next thing to check before calling it closed.
 
@@ -106,10 +135,11 @@ The same table is also consistent with **hedging that is not carry**: holders of
 ## Reproduce
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]" && pytest                  # 32 tests
+pip install -e ".[dev]" && pytest                  # 38 tests
 bash scripts/fetch_carry_data.sh 2023-01-01        # universe + funding + hourly perp/spot (~1–2 h)
 # the first study run builds the funding and price matrices in data/processed/ (~15 min, once)
 python scripts/funding_persistence.py              # study 1
 python scripts/default_carry.py --n 20             # study 2 -> reports/default_carry/
 python scripts/funding_by_volume.py --min-windows 30   # study 3
+python scripts/run_carry.py --end 2026-10-23       # rotation, grid, walk-forward, unhedged 2x2 (~40 min)
 ```

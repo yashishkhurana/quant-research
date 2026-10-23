@@ -20,7 +20,9 @@ from qr.backtest.engine import run
 from qr.backtest.report import tearsheet
 from qr.data.history import delisting_times
 from qr.data.store import read_range
-from qr.strategies.carry import CarryParams, build_weights, implied_leverage, run_with_risk
+from qr.data.funding import per_window
+from qr.strategies.carry import (CarryParams, build_weights, implied_leverage, point_in_time_universe,
+                                 run_with_risk)
 from qr.validation import deflated_sharpe
 
 OUT = Path("reports/carry")
@@ -44,7 +46,9 @@ def load(bases: list[str], start: str, end: str):
         closes[f"{b}-PERP"] = kp["close"]
         if not ks.empty:                       # perp-only coins stay in: tradeable unhedged, never hedged
             closes[f"{b}-SPOT"] = ks["close"]
-        fund[b] = f["rate"]
+        r = f["rate"].copy()
+        r.index = r.index.round("min")                     # fundingTime carries ms jitter (see load_funding)
+        fund[b] = r[~r.index.duplicated(keep="last")]
         dvol[b] = kp["quote_vol"] if "quote_vol" in kp else kp["close"] * kp["volume"]
     prices = pd.DataFrame(closes).sort_index()
     prices = prices[~prices.index.duplicated()]
@@ -53,6 +57,56 @@ def load(bases: list[str], start: str, end: str):
     dollar_volume = pd.DataFrame(dvol).sort_index()
     dollar_volume = dollar_volume[~dollar_volume.index.duplicated()].reindex(prices.index)
     return prices, funding, dollar_volume
+
+
+def pnl_split(res) -> tuple[pd.DataFrame, dict]:
+    """Per-year price / funding / cost P&L (simple sums of per-bar returns) and compounded net;
+    plus the same three per year over the full sample. price + funding + costs = net, per bar."""
+    df = pd.DataFrame({"price": res.gross_returns, "funding": res.funding_pnl, "costs": -res.costs, "net": res.returns})
+    y = df.groupby(df.index.year)
+    t = y[["price", "funding", "costs"]].sum()
+    t["net_compounded"] = y["net"].apply(lambda r: (1 + r).prod() - 1)
+    yrs = len(df) / res.bars_per_year
+    return t, {k: float(df[k].sum() / yrs) for k in ("price", "funding", "costs")}
+
+
+def no_signal_short(prices, funding, dvol, p: CarryParams, gross: float) -> pd.DataFrame:
+    """Control for the unhedged book: equal-weight short of the same point-in-time top-N universe,
+    no funding signal, re-decided at the same 8h window ends, `gross` total short, delistings exit."""
+    bases = [b for b in funding.columns if f"{b}-PERP" in prices.columns]
+    cols = [f"{b}-PERP" for b in bases]
+    priced = prices[cols].notna().values
+    univ = point_in_time_universe(dvol.reindex(columns=bases).reindex(prices.index), p.universe_n,
+                                  p.volume_window, p.universe_exit_n).fillna(False).values & priced
+    dec = np.zeros(len(prices), dtype=bool)
+    dec[np.unique(np.clip(prices.index.searchsorted(per_window(funding[bases]).index), 0, len(prices) - 1))] = True
+    sel = pd.DataFrame(np.where(dec[:, None], univ, np.nan), index=prices.index).ffill().fillna(0).values.astype(bool) & priced
+    n = sel.sum(axis=1).astype(float); n[n == 0] = np.nan
+    w = pd.DataFrame(0.0, index=prices.index, columns=prices.columns)
+    w[cols] = np.nan_to_num(-sel.astype(float) / n[:, None]) * gross
+    return w
+
+
+def unhedged_controls(prices, funding, dvol, p: CarryParams, res_u) -> pd.DataFrame:
+    """2x2: carry signal vs no-signal short (gross matched to the signal's average when invested),
+    each with and without the kill switch. Separates what the signal, the stop and the market did."""
+    f_perp = funding.rename(columns=lambda b: f"{b}-PERP")
+    kw = dict(fee_bps=4, slippage_bps=3, funding=f_perp, max_gross=p.max_gross, rebalance_band=p.rebalance_band)
+    ws = build_weights(prices, funding, p, dvol)
+    g = ws.abs().sum(axis=1); gross = float(g[g > 0].mean())
+    wn = no_signal_short(prices, funding, dvol, p, gross)
+    runs = {("carry signal", True): res_u, ("carry signal", False): run(prices, ws, **kw),
+            (f"no signal, short all top {p.universe_n} (gross {gross:.2f})", True):
+                run_with_risk(prices, funding, p, dollar_volume=dvol, weights=wn),
+            (f"no signal, short all top {p.universe_n} (gross {gross:.2f})", False): run(prices, wn, **kw)}
+    rows = []
+    for (book, kill), r in runs.items():
+        t, full = pnl_split(r)
+        rows.append({"book": book, "kill_switch": kill, "price_ann": full["price"], "funding_ann": full["funding"],
+                     "costs_ann": full["costs"], "ann_return": r.metrics["ann_return"], "sharpe": r.metrics["sharpe"],
+                     "max_dd": r.metrics["max_drawdown"], "kill_events": r.metrics.get("kill_events", 0),
+                     **{f"net_{y}": v for y, v in t["net_compounded"].items()}})
+    return pd.DataFrame(rows)
 
 
 def stress(res, windows: dict[str, tuple[str, str]]) -> pd.DataFrame:
@@ -113,6 +167,10 @@ def main(a):
               "unhedged_avg_turnover_per_bar": res_u.metrics["avg_turnover_per_bar"],
               "hedged_worst_week": float(wk(res.returns).min()),
               "hedged_worst_week_date": str(wk(res.returns).idxmin().date())})
+    uc = unhedged_controls(prices, funding, dvol, CarryParams(universe_n=a.universe_n, hedged=False), res_u)
+    uc.to_csv(OUT / "unhedged_controls.csv", index=False)
+    split_u, _ = pnl_split(res_u)
+    split_u.to_csv(OUT / "unhedged_split.csv")
 
     # parameter grid: lookback x entry threshold (full sample; this is the in-sample picture)
     grid_lb, grid_entry = [3, 6, 9, 15, 21], [0.05, 0.10, 0.15, 0.20, 0.30]
@@ -133,6 +191,19 @@ def main(a):
     m["psr_vs_zero"] = psr0["psr"]
     m["grid_sharpe_min"] = float(np.nanmin(tbl.values)); m["grid_sharpe_max"] = float(np.nanmax(tbl.values))
     m.update({f"dsr_{k}": v for k, v in dsr.items()})
+    # The best grid cell, chosen after seeing all 25: plain PSR against zero, deflated for 25 trials
+    # with the zero-skill variance (1/T, the honest benchmark here), and against the grid's spread.
+    keys = list(itertools.product(grid_lb, grid_entry))
+    ib = int(np.nanargmax([tbl.loc[k] for k in keys]))
+    best = trials[ib]
+    m["best_cell_lookback"], m["best_cell_entry"] = keys[ib]
+    m["best_cell_sharpe"] = float(tbl.loc[keys[ib]])
+    m["best_cell_psr_vs_zero"] = deflated_sharpe(best, 1, res.bars_per_year, var_trials=0.0)["psr"]
+    d1 = deflated_sharpe(best, len(trials), res.bars_per_year)               # var_trials = 1/T
+    m["best_cell_dsr_sr0_ann"], m["best_cell_dsr_psr"] = d1["sr0_ann"], d1["psr"]
+    m["best_cell_dsr_gridvar_psr"] = deflated_sharpe(best, len(trials), res.bars_per_year,
+                                                     var_trials=float(per_bar_sr.var()))["psr"]
+    m["grid_cells_positive"] = int((tbl.values > 0).sum())
 
     # walk-forward: refit (lookback, entry) on 6 months, trade next 2 months
     bars_train, bars_test = 24 * 182, 24 * 61
@@ -167,11 +238,11 @@ def main(a):
     st.to_csv(OUT / "stress.csv", index=False)
 
     json.dump(m, open(OUT / "metrics.json", "w"), indent=2, default=float)
-    write_note(m, tbl, st, prices, funding, base)
+    write_note(m, tbl, st, prices, funding, base, split_u, uc)
     print(json.dumps(m, indent=2, default=float))
 
 
-def write_note(m, tbl, st, prices, funding, p: CarryParams):
+def write_note(m, tbl, st, prices, funding, p: CarryParams, split_u=None, uc=None):
     pct = lambda x: f"{x:+.1%}" if x == x else "n/a"
     f2 = lambda x: f"{x:.2f}" if x == x else "n/a"
     period = f"{prices.index[0]:%Y-%m-%d} to {prices.index[-1]:%Y-%m-%d}"
@@ -182,6 +253,20 @@ def write_note(m, tbl, st, prices, funding, p: CarryParams):
     st_md = "| Window | Return | Max DD | Worst hour |\n| --- | --- | --- | --- |\n"
     for _, r in st.iterrows():
         st_md += f"| {r['window']} | {pct(r['return'])} | {pct(r['max_dd'])} | {pct(r['worst_bar'])} |\n"
+    uc_md = ""
+    if split_u is not None and uc is not None:
+        yrs = [c for c in uc.columns if c.startswith("net_2")]
+        L = ["Unhedged P&L by year (simple sums of per-bar returns; compounded net):", "",
+             "| Year | Price | Funding | Costs | Net (compounded) |", "| --- | --- | --- | --- | --- |"]
+        L += [f"| {y} | {pct(r.price)} | {pct(r.funding)} | {pct(r.costs)} | {pct(r.net_compounded)} |" for y, r in split_u.iterrows()]
+        L += ["", "Controls: the same signal without the kill switch, and a no-signal equal-weight short of the same universe at matched gross, with and without it:", "",
+              "| Book | Kill switch | Price / yr | Funding / yr | Costs / yr | Net / yr | Sharpe | Max DD | Kill events | " + " | ".join(c[4:] for c in yrs) + " |",
+              "| --- " * (9 + len(yrs)) + "|"]
+        for _, r in uc.iterrows():
+            L.append(f"| {r['book']} | {'8% DD' if r['kill_switch'] else 'none'} | {pct(r['price_ann'])} | {pct(r['funding_ann'])} | "
+                     f"{pct(r['costs_ann'])} | {pct(r['ann_return'])} | {f2(r['sharpe'])} | {pct(r['max_dd'])} | {r['kill_events']} | "
+                     + " | ".join(pct(r[c]) for c in yrs) + " |")
+        uc_md = "\n".join(L)
     note = f"""# Funding-rate carry on Binance perps
 
 **One line:** delta-neutral long-spot / short-perp across the top {m['universe_n']} Binance USDT perps by trailing volume (point in time, from {m['assets_with_data']} listed contracts), held when trailing funding annualises above {p.entry_apr:.0%}; {pct(m['ann_return'])} a year net of fees, slippage and funding, Sharpe {f2(m['sharpe'])}, max drawdown {pct(m['max_drawdown'])}, {period}.
@@ -234,10 +319,12 @@ Hedged vs unhedged, same signal and risk layer:
 
 The unhedged book can also trade the {m['n_perp_only']} contracts that never had a Binance spot market (mostly 2024-25 meme and launch tokens), which is where much of the real "funding carry" PnL of that period came from, and where the squeezes were.
 
+{uc_md}
+
 ![unhedged](../reports/carry/tearsheet_unhedged.png)
 
 ## Validation
-{len(tbl.values.ravel())} parameter combinations were tried. Grid Sharpe ranges {f2(m['grid_sharpe_min'])} to {f2(m['grid_sharpe_max'])}. Probability the base-case Sharpe is above zero: {m['psr_vs_zero']:.0%}. Deflated Sharpe against the grid's spread: benchmark {f2(m['dsr_sr0_ann'])}, probability {m['dsr_psr']:.0%}; the trials differ mainly in how much they trade, not in sampling noise, so this benchmark is reported for completeness and not relied on. Walk-forward, refitting lookback and threshold on six months and trading the next two ({m.get('wf_untradeable_folds', 0)} folds where no parameter set traded in-sample, run on base parameters): out-of-sample Sharpe {f2(m.get('wf_sharpe', float('nan')))}, annualised return {pct(m.get('wf_ann_return', float('nan')))}, max drawdown {pct(m.get('wf_max_dd', float('nan')))} over {m.get('wf_bars', 0)} hours.
+{len(tbl.values.ravel())} parameter combinations were tried. Grid Sharpe ranges {f2(m['grid_sharpe_min'])} to {f2(m['grid_sharpe_max'])}. Probability the base-case Sharpe is above zero: {m['psr_vs_zero']:.0%}. Deflated Sharpe against the grid's spread: benchmark {f2(m['dsr_sr0_ann'])}, probability {m['dsr_psr']:.0%}; the trials differ mainly in how much they trade, not in sampling noise, so this benchmark is reported for completeness and not relied on. {m['grid_cells_positive']} of {len(tbl.values.ravel())} cells have a positive Sharpe; the best (lookback {m['best_cell_lookback']}, entry {m['best_cell_entry']:.0%}) has Sharpe {f2(m['best_cell_sharpe'])}, probability above zero {m['best_cell_psr_vs_zero']:.0%} taken alone, and {m['best_cell_dsr_psr']:.0%} after deflating for {len(tbl.values.ravel())} trials (zero-skill benchmark Sharpe {f2(m['best_cell_dsr_sr0_ann'])}). Walk-forward, refitting lookback and threshold on six months and trading the next two ({m.get('wf_untradeable_folds', 0)} folds where no parameter set traded in-sample, run on base parameters): out-of-sample Sharpe {f2(m.get('wf_sharpe', float('nan')))}, annualised return {pct(m.get('wf_ann_return', float('nan')))}, max drawdown {pct(m.get('wf_max_dd', float('nan')))} over {m.get('wf_bars', 0)} hours.
 
 ## What broke
 - Funding income arrives in discrete 8h lumps while the spot/perp basis moves continuously; most of the drawdown is basis, not funding turning negative. The hedge is not free in a squeeze.

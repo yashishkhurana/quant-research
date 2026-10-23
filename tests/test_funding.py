@@ -35,3 +35,12 @@ def test_interval_hours():
     assert set(iv["A"].dropna().unique()) == {8.0}
     assert set(iv["B"].dropna().unique()) == {4.0}
     assert {4.0, 1.0} <= set(iv["C"].dropna().unique())
+
+
+def test_per_window_ignores_ms_jitter():
+    # Binance stamps settlements like 08:00:00.008; with closed='right' that must stay in the
+    # window ending 08:00, not slip into the one ending 16:00.
+    idx = pd.to_datetime(["2024-01-01 00:00:00", "2024-01-01 08:00:00.008", "2024-01-01 16:00:00.005"], utc=True, format="ISO8601")
+    f8 = per_window(pd.DataFrame({"A": [1.0, 2.0, 3.0]}, index=idx))["A"]
+    assert f8[pd.Timestamp("2024-01-01 08:00", tz="UTC")] == 2.0
+    assert f8[pd.Timestamp("2024-01-01 16:00", tz="UTC")] == 3.0
