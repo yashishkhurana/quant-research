@@ -47,15 +47,26 @@ class CarryParams:
     universe_n: int = 40         # tradeable set = top N by trailing dollar volume, point in time
     volume_window: int = 24 * 30 # bars of trailing volume used for that rank
     hedged: bool = True          # False = short perp only, no spot leg (the "unhedged carry" people ran)
+    universe_exit_n: int = 60    # a coin leaves the tradeable set only when it drops below this rank
+    rebalance_band: float = 0.25 # engine no-trade band, fraction of target weight
 
 
-def point_in_time_universe(dollar_volume: pd.DataFrame, n: int, window: int) -> pd.DataFrame:
-    """Boolean mask, True where an asset is in the top-n by trailing `window`-bar dollar volume
-    as of that bar. Uses only past volume, so a coin enters the universe when it becomes liquid
-    and leaves when it stops trading, which is how a live desk would have seen it."""
+def point_in_time_universe(dollar_volume: pd.DataFrame, n: int, window: int,
+                           exit_n: int | None = None) -> pd.DataFrame:
+    """Boolean mask, True where an asset is in the tradeable set by trailing `window`-bar dollar
+    volume as of that bar. Uses only past volume, so a coin enters when it becomes liquid and
+    leaves when it stops trading. With `exit_n` > n the membership has hysteresis: enter at rank
+    <= n, leave only at rank > exit_n, so coins at the boundary do not flip in and out hourly."""
     tv = dollar_volume.fillna(0.0).rolling(window, min_periods=window // 4).sum()
     rank = tv.where(tv > 0).rank(axis=1, ascending=False)
-    return rank.le(n)
+    if exit_n is None or exit_n <= n:
+        return rank.le(n)
+    enter = rank.le(n).values; stay = rank.le(exit_n).values
+    out = np.zeros_like(enter); state = np.zeros(enter.shape[1], dtype=bool)
+    for i in range(len(enter)):
+        state = np.where(state, stay[i], enter[i])
+        out[i] = state
+    return pd.DataFrame(out, index=rank.index, columns=rank.columns)
 
 
 def annualised_carry(funding: pd.DataFrame, lookback: int) -> pd.DataFrame:
@@ -81,7 +92,7 @@ def build_weights(prices: pd.DataFrame, funding: pd.DataFrame, p: CarryParams,
         tradeable &= prices[[f"{b}-SPOT" for b in bases]].notna().values
     if dollar_volume is not None:
         in_univ = point_in_time_universe(dollar_volume.reindex(columns=bases).reindex(prices.index),
-                                         p.universe_n, p.volume_window)
+                                         p.universe_n, p.volume_window, p.universe_exit_n)
         tradeable &= in_univ.fillna(False).values
     carry = carry.where(tradeable, np.nan)
 
@@ -96,9 +107,19 @@ def build_weights(prices: pd.DataFrame, funding: pd.DataFrame, p: CarryParams,
         out[i] = state
     on.loc[:, :] = out
 
-    # rank by carry among 'on' assets; keep top max_assets
+    # rank by carry among 'on' assets; keep top max_assets. The selection is only re-decided on
+    # bars where a settlement has just landed (the signal cannot change in between); on other bars
+    # the previous selection is carried forward, minus anything that stopped being tradeable.
     ranked = carry.where(on).rank(axis=1, ascending=False)
-    selected = ranked.le(p.max_assets) & on
+    fresh = ranked.le(p.max_assets) & on
+    sett_bar = pd.Series(False, index=prices.index)
+    sett_bar.iloc[np.unique(np.clip(prices.index.searchsorted(funding.index, side="left"), 0, len(prices.index) - 1))] = True
+    sel = np.zeros_like(fresh.values); prev = np.zeros(fresh.shape[1], dtype=bool)
+    fv, tr_v, sb = fresh.values, tradeable, sett_bar.values
+    for i in range(len(sel)):
+        prev = fv[i] if sb[i] else (prev & tr_v[i])
+        sel[i] = prev
+    selected = pd.DataFrame(sel, index=fresh.index, columns=fresh.columns)
     n = selected.sum(axis=1).replace(0, np.nan)
     per_asset = (1.0 / n).clip(upper=p.max_weight)
     leg = selected.astype(float).mul(per_asset, axis=0).fillna(0.0)
@@ -114,15 +135,26 @@ def build_weights(prices: pd.DataFrame, funding: pd.DataFrame, p: CarryParams,
     return w.mul(scale, axis=0)
 
 
-def kill_mask(equity: pd.Series, p: CarryParams, prior: np.ndarray | None = None) -> np.ndarray:
-    """True on bars that must be flat: every drawdown breach plus `cooldown_bars` after it.
-    Breaches are detected on the equity curve that already includes earlier kills, so the
-    mask is grown monotonically (union with `prior`) and the loop in run_with_risk converges."""
-    dd = equity / equity.cummax() - 1
-    breach = (dd < -p.kill_dd).values
-    mask = np.zeros(len(equity), dtype=bool) if prior is None else prior.copy()
-    for i in np.where(breach)[0]:
-        mask[i + 1:i + 1 + p.cooldown_bars] = True       # flat from the NEXT bar: the breach bar is already realised
+def kill_mask(returns: pd.Series, p: CarryParams, active: np.ndarray | None = None) -> np.ndarray:
+    """True on bars that must be flat. Walks the bar returns once: track a peak, and when equity
+    falls more than `kill_dd` below it, go flat for `cooldown_bars`; on re-entry the peak is reset
+    to current equity so the drawdown condition is measured from the re-entry, not from an
+    all-time high the flat book can never climb back to. `active` (optional) marks bars where the
+    book had a position; breaches are only counted on those bars."""
+    r = returns.fillna(0.0).values
+    n = len(r); mask = np.zeros(n, dtype=bool)
+    eq = 1.0; peak = 1.0; i = 0
+    while i < n:
+        eq *= (1 + r[i])
+        peak = max(peak, eq)
+        trading = True if active is None else bool(active[i])
+        if trading and eq / peak - 1 < -p.kill_dd:
+            end = min(n, i + 1 + p.cooldown_bars)
+            mask[i + 1:end] = True
+            i = end
+            peak = eq                                      # reference reset at re-entry
+            continue
+        i += 1
     return mask
 
 
@@ -135,16 +167,19 @@ def run_with_risk(prices: pd.DataFrame, funding_rates: pd.DataFrame, p: CarryPar
 
     f_perp = funding_rates.rename(columns={b: f"{b}-PERP" for b in funding_rates.columns})
     w = build_weights(prices, funding_rates, p, dollar_volume)
-    kw = dict(fee_bps=fee_bps, slippage_bps=slippage_bps, funding=f_perp, max_gross=p.max_gross)
+    kw = dict(fee_bps=fee_bps, slippage_bps=slippage_bps, funding=f_perp, max_gross=p.max_gross,
+              rebalance_band=p.rebalance_band)
     res = run(prices, w, **kw)
-    mask = None
+    mask = np.zeros(len(w), dtype=bool)
     for _ in range(max_iter):
-        new = kill_mask(res.equity, p, mask)
-        if mask is not None and (new == mask).all():
+        active = (res.weights.abs().sum(axis=1) > 0).values
+        new = kill_mask(res.returns, p, active)
+        if (new == mask).all():
             break
         mask = new
         res = run(prices, w * (~mask)[:, None], **kw)
-    res.metrics["kill_bars"] = int(mask.sum()) if mask is not None else 0
+    res.metrics["kill_bars"] = int(mask.sum())
+    res.metrics["kill_events"] = int((mask[1:] & ~mask[:-1]).sum())
     return res
 
 

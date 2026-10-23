@@ -82,9 +82,12 @@ def main(a):
 
     # no-risk-layer comparison: same signal, no kill switch
     f_perp = funding.rename(columns=lambda b: f"{b}-PERP")
-    res_nr = run(prices, build_weights(prices, funding, base, dvol), fee_bps=4, slippage_bps=3,
+    res_nr = run(prices, build_weights(prices, funding, base, dvol), fee_bps=4, slippage_bps=3, rebalance_band=base.rebalance_band,
                  funding=f_perp, max_gross=base.max_gross)
     m["sharpe_no_kill"] = res_nr.metrics["sharpe"]; m["max_dd_no_kill"] = res_nr.metrics["max_drawdown"]
+    tgt = build_weights(prices, funding, base, dvol)
+    m["turnover_from_target_changes_per_bar"] = float(tgt.diff().abs().sum(axis=1).mean())
+    m["kill_events"] = res.metrics.get("kill_events", 0)
     m["n_perp_only"] = int(sum(1 for c in prices.columns if c.endswith("-PERP") and c.replace("-PERP", "-SPOT") not in prices.columns))
 
     # unhedged variant: same signal, short perp only. This is the trade most "funding carry" PnL in
@@ -97,6 +100,8 @@ def main(a):
               "unhedged_worst_week": float(wk(res_u.returns).min()),
               "unhedged_worst_week_date": str(wk(res_u.returns).idxmin().date()),
               "unhedged_kill_bars": res_u.metrics.get("kill_bars", 0),
+              "unhedged_kill_events": res_u.metrics.get("kill_events", 0),
+              "unhedged_avg_turnover_per_bar": res_u.metrics["avg_turnover_per_bar"],
               "hedged_worst_week": float(wk(res.returns).min()),
               "hedged_worst_week_date": str(wk(res.returns).idxmin().date())})
 
@@ -120,12 +125,15 @@ def main(a):
     start = 0
     while start + bars_train + bars_test <= len(prices):
         tr = slice(start, start + bars_train); te = slice(start + bars_train, start + bars_train + bars_test)
-        best, best_sr = None, -np.inf
+        best, best_sr = base, -np.inf          # fall back to base params if no combo traded
         for lb, en in itertools.product(grid_lb, grid_entry):
             p = CarryParams(lookback=lb, entry_apr=en, exit_apr=en * 0.3, universe_n=a.universe_n)
             sr = rr(prices.iloc[tr], funding, p).metrics.get("sharpe", -np.inf)
-            if sr > best_sr:
+            if np.isfinite(sr) and sr > best_sr:
                 best, best_sr = p, sr
+        if not np.isfinite(best_sr):
+            wf_untradeable = m.get("wf_untradeable_folds", 0) + 1
+            m["wf_untradeable_folds"] = wf_untradeable
         oos.append(rr(prices.iloc[te], funding, best).returns)
         start += bars_test
     if oos:
@@ -134,7 +142,7 @@ def main(a):
         m["wf_sharpe"] = float(o.mean() / o.std(ddof=1) * np.sqrt(res.bars_per_year))
         m["wf_ann_return"] = float(eq.iloc[-1] ** (res.bars_per_year / len(o)) - 1)
         m["wf_max_dd"] = float((eq / eq.cummax() - 1).min())
-        m["wf_bars"] = int(len(o))
+        m["wf_bars"] = int(len(o)); m.setdefault("wf_untradeable_folds", 0)
 
     st = stress(res, {"Mar 2023 USDC depeg": ("2023-03-09", "2023-03-15"),
                       "Aug 2023 crash": ("2023-08-15", "2023-08-20"),
@@ -170,7 +178,7 @@ Perp funding is paid by whoever is crowded. When longs crowd in, funding goes po
 Binance USDT-M perps and Binance spot, hourly closes, {period}. Funding settled every 8h from the fapi funding endpoint. Universe: {m['assets_with_data']} USDT perps with funding, perp and spot history (every contract Binance has listed in the window, delisted ones included; {m['n_delisted_in_sample']} are no longer trading at the end of the sample). At each bar the tradeable set is the top {m['universe_n']} by trailing 30-day dollar volume, ranked point in time, averaging {m['avg_assets_eligible']:.0f} eligible names; nothing is selected on what is liquid today. An asset is only tradeable on bars where both perp and spot have a price, and a delisting force-closes the position at the last price with the exit paid for.
 
 ## Method
-Signal: trailing mean funding over {p.lookback} settlements, annualised. Enter when above {p.entry_apr:.0%} APR, exit when below {p.exit_apr:.0%} (hysteresis). Equal weight across qualifying assets, at most {p.max_assets} assets, at most {p.max_weight:.0%} of equity per leg, gross capped at {p.max_gross:.1f}x. Rebalance hourly on signal changes only. Costs: {4} bps fee + {3} bps slippage per leg on turnover. Risk layer: flatten everything if drawdown exceeds {p.kill_dd:.0%} and stay flat {p.cooldown_bars} hours. The weight at bar t uses funding settled at or before t and earns t to t+1; nothing is shifted inside the backtester.
+Signal: trailing mean funding over {p.lookback} settlements, annualised. Enter when above {p.entry_apr:.0%} APR, exit when below {p.exit_apr:.0%} (hysteresis). Equal weight across qualifying assets, at most {p.max_assets} assets, at most {p.max_weight:.0%} of equity per leg, gross capped at {p.max_gross:.1f}x. Selection is re-decided only when a settlement lands; between settlements the engine holds realised weights inside a {p.rebalance_band:.0%} no-trade band, so price drift is not traded hourly. The tradeable set has hysteresis (enter top {p.universe_n} by trailing 30-day volume, leave below {p.universe_exit_n}). Costs: {4} bps fee + {3} bps slippage per leg on turnover. Risk layer: flatten everything if drawdown from the peak since the last re-entry exceeds {p.kill_dd:.0%}, stay flat {p.cooldown_bars} hours, then re-enter with the reference reset. The weight at bar t uses funding settled at or before t and earns t to t+1; nothing is shifted inside the backtester.
 
 ## Results
 | Metric | Value |
@@ -185,7 +193,8 @@ Signal: trailing mean funding over {p.lookback} settlements, annualised. Enter w
 | Turnover / yr | {m['ann_turnover']:.0f}x |
 | Avg assets held | {m['avg_n_assets']:.1f} |
 | Avg / max perp leverage | {f2(m['avg_perp_leverage'])}x / {f2(m['max_perp_leverage'])}x |
-| Bars flat on kill-switch | {m.get('kill_bars', 0)} |
+| Kill-switch events / bars flat | {m.get('kill_events', 0)} / {m.get('kill_bars', 0)} |
+| Turnover from signal changes / bar | {m['turnover_from_target_changes_per_bar']:.4f} (of {m['avg_turnover_per_bar']:.4f} total) |
 | Same signal, no kill-switch | Sharpe {f2(m['sharpe_no_kill'])}, max DD {pct(m['max_dd_no_kill'])} |
 
 ![tearsheet](../reports/carry/tearsheet.png)
@@ -205,14 +214,15 @@ Hedged vs unhedged, same signal and risk layer:
 | Sharpe | {f2(m['sharpe'])} | {f2(m['unhedged_sharpe'])} |
 | Max drawdown | {pct(m['max_drawdown'])} | {pct(m['unhedged_max_dd'])} |
 | Worst week | {pct(m['hedged_worst_week'])} ({m['hedged_worst_week_date']}) | {pct(m['unhedged_worst_week'])} ({m['unhedged_worst_week_date']}) |
-| Bars flat on kill-switch | {m.get('kill_bars', 0)} | {m['unhedged_kill_bars']} |
+| Kill-switch events / bars flat | {m.get('kill_events', 0)} / {m.get('kill_bars', 0)} | {m['unhedged_kill_events']} / {m['unhedged_kill_bars']} |
+| Turnover / bar | {m['avg_turnover_per_bar']:.4f} | {m['unhedged_avg_turnover_per_bar']:.4f} |
 
 The unhedged book can also trade the {m['n_perp_only']} contracts that never had a Binance spot market (mostly 2024-25 meme and launch tokens), which is where much of the real "funding carry" PnL of that period came from, and where the squeezes were.
 
 ![unhedged](../reports/carry/tearsheet_unhedged.png)
 
 ## Validation
-{len(tbl.values.ravel())} parameter combinations were tried. Deflated Sharpe: probability the base-case Sharpe beats the expected best of {m['dsr_n_trials']} zero-skill trials is {m['dsr_psr']:.0%} (benchmark Sharpe after deflation {f2(m['dsr_sr0_ann'])}). Walk-forward, refitting lookback and threshold on six months and trading the next two: out-of-sample Sharpe {f2(m.get('wf_sharpe', float('nan')))}, annualised return {pct(m.get('wf_ann_return', float('nan')))}, max drawdown {pct(m.get('wf_max_dd', float('nan')))} over {m.get('wf_bars', 0)} hours.
+{len(tbl.values.ravel())} parameter combinations were tried. Deflated Sharpe: probability the base-case Sharpe beats the expected best of {m['dsr_n_trials']} zero-skill trials is {m['dsr_psr']:.0%} (benchmark Sharpe after deflation {f2(m['dsr_sr0_ann'])}). Walk-forward, refitting lookback and threshold on six months and trading the next two ({m.get('wf_untradeable_folds', 0)} folds where no parameter set traded in-sample, run on base parameters): out-of-sample Sharpe {f2(m.get('wf_sharpe', float('nan')))}, annualised return {pct(m.get('wf_ann_return', float('nan')))}, max drawdown {pct(m.get('wf_max_dd', float('nan')))} over {m.get('wf_bars', 0)} hours.
 
 ## What broke
 - Funding income arrives in discrete 8h lumps while the spot/perp basis moves continuously; most of the drawdown is basis, not funding turning negative. The hedge is not free in a squeeze.

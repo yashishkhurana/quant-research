@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from qr.strategies.carry import CarryParams, build_weights, kill_mask, run_with_risk
+from qr.strategies.carry import CarryParams, build_weights, kill_mask, run_with_risk, point_in_time_universe
 
 
 def _world(n_days=60, bases=("AAA", "BBB", "CCC"), seed=3):
@@ -53,13 +53,42 @@ def test_carry_collects_funding_on_flat_prices():
     assert res.equity.iloc[-1] > 1.0
 
 
-def test_kill_mask_flattens_after_breach_and_grows_monotonically():
-    eq = pd.Series(np.r_[np.linspace(1, 1.2, 50), np.linspace(1.2, 1.0, 50), np.linspace(1.0, 1.3, 50)])
+def test_kill_mask_flattens_after_breach_then_re_enters():
+    # equity: up 20%, down 17% (breach), then recovers. The old mask never let the book back in
+    # because drawdown stayed below threshold against the all-time high while flat.
+    eq = np.r_[np.linspace(1, 1.2, 50), np.linspace(1.2, 1.0, 50), np.linspace(1.0, 1.3, 100)]
+    r = pd.Series(np.diff(eq, prepend=1.0) / np.r_[1.0, eq[:-1]])
     p = CarryParams(kill_dd=0.10, cooldown_bars=20)
-    m1 = kill_mask(eq, p)
-    assert m1.any() and not m1[:50].any()
-    m2 = kill_mask(eq, p, m1)
-    assert (m2 >= m1).all()
+    m = kill_mask(r, p)
+    assert m.any() and not m[:50].any()
+    first_kill = int(np.argmax(m))
+    assert m[first_kill:first_kill + 20].all()
+    assert not m[first_kill + 20:first_kill + 40].any()      # back in after cooldown
+    assert m.sum() < 60                                      # not flat for the rest of the sample
+
+
+def test_kill_switch_re_enters_in_full_pipeline():
+    prices, funding = _world(n_days=120)
+    prices[:] = 100.0
+    # a 10% one-day loss on AAA spot at day 30 while the perp is flat -> drawdown on the hedged book
+    prices.loc[prices.index[30 * 24]:prices.index[30 * 24 + 23], "AAA-SPOT"] = 90.0
+    prices.loc[prices.index[30 * 24 + 24]:, "AAA-SPOT"] = 90.0
+    p = CarryParams(lookback=3, kill_dd=0.02, cooldown_bars=24, max_weight=0.5, max_gross=2.0)
+    res = run_with_risk(prices, funding, p)
+    assert res.metrics["kill_events"] >= 1
+    active = (res.weights.abs().sum(axis=1) > 0).values
+    assert active[-24:].any()                                # trading again by the end
+
+
+def test_rebalance_band_cuts_turnover():
+    prices, funding = _world(n_days=60)
+    p0 = CarryParams(lookback=3, rebalance_band=0.0)
+    p1 = CarryParams(lookback=3, rebalance_band=0.25)
+    t0 = run_with_risk(prices, funding, p0).turnover.iloc[48:].mean()
+    t1 = run_with_risk(prices, funding, p1).turnover.iloc[48:].mean()
+    target_changes = build_weights(prices, funding, p1).diff().abs().sum(axis=1).iloc[48:].mean()
+    assert t1 < t0                                           # drift is no longer traded...
+    assert abs(t1 - target_changes) < 0.1 * target_changes   # ...and what remains is signal changes
 
 
 def test_point_in_time_universe_uses_only_past_volume():
@@ -83,3 +112,14 @@ def test_unhedged_has_no_spot_leg_and_trades_perp_only_coins():
     assert (w_h["CCC-PERP"] == 0).all()                   # hedged: cannot trade it
     assert (w_u["CCC-PERP"].iloc[50:] < 0).all()          # unhedged: shorts it
     assert (w_u.filter(like="-SPOT") == 0).all().all()
+
+
+def test_universe_hysteresis_stops_boundary_flipping():
+    idx = pd.date_range("2024-01-01", periods=200, freq="1h", tz="UTC")
+    rng = np.random.default_rng(0)
+    v = pd.DataFrame({"A": 100.0, "B": 100.0 + rng.normal(0, 30, 200), "C": 100.0 + rng.normal(0, 30, 200)}, index=idx)
+    plain = point_in_time_universe(v, n=2, window=1)
+    hyst = point_in_time_universe(v, n=2, window=1, exit_n=3)
+    flips_plain = plain.astype(int).diff().abs().sum().sum()
+    flips_hyst = hyst.astype(int).diff().abs().sum().sum()
+    assert flips_hyst < flips_plain

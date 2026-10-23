@@ -76,51 +76,70 @@ def run(
     slippage_bps: float = 2.0,
     funding: pd.DataFrame | None = None,
     max_gross: float | None = None,
+    rebalance_band: float = 0.0,
 ) -> Result:
+    """`rebalance_band`: no-trade band as a fraction of the target weight. With 0 the book is
+    rebalanced to the exact target every bar (charging price drift every bar). With e.g. 0.25 an
+    asset is only traded when its realised weight is more than 25% of target away from target,
+    or when the target itself changes sign / goes to zero. Realised weights then drift between
+    trades, and the book that earns the next bar's return is the realised one, not the target.
+    """
     prices = prices.sort_index()
     weights = weights.reindex(index=prices.index, columns=prices.columns).fillna(0.0)
-
-    # Untradeable -> zero weight; the force-close cost is picked up by turnover below.
     tradeable = prices.notna()
-    weights = weights.where(tradeable, 0.0)
+    weights = weights.where(tradeable, 0.0)              # untradeable -> forced flat
 
     if max_gross is not None:
         gross = weights.abs().sum(axis=1)
         scale = (max_gross / gross).clip(upper=1.0).fillna(1.0)
         weights = weights.mul(scale, axis=0)
 
-    rets = prices.pct_change(fill_method=None)           # r_t = p_t / p_{t-1} - 1
-    rets_filled = rets.fillna(0.0)
+    rets = prices.pct_change(fill_method=None).fillna(0.0).values
+    W = weights.values
+    n_bars, n_assets = W.shape
 
-    w_prev = weights.shift(1).fillna(0.0)                 # weight held during bar t
-    gross_r = (w_prev * rets_filled).sum(axis=1)          # portfolio return over bar t
-
-    # Drift: weights held through bar t grow with asset returns before rebalance at t.
-    drifted = w_prev * (1 + rets_filled)
-    drifted = drifted.div(1 + gross_r, axis=0).fillna(0.0)
-    dw = (weights - drifted).abs()
-    turnover = dw.sum(axis=1)
-    cost = turnover * (fee_bps + slippage_bps) / 1e4
-
-    fund_pnl = pd.Series(0.0, index=prices.index)
+    sett = np.zeros_like(W)
     if funding is not None and not funding.empty:
         # A settlement at time s is charged to the position held into the first bar >= s.
-        sett = pd.DataFrame(0.0, index=prices.index, columns=prices.columns)
-        pos = prices.index.searchsorted(funding.index, side="left")
-        for i, (ts, row) in zip(pos, funding.iterrows()):
-            if i < len(prices.index):
-                sett.iloc[i] += row.reindex(prices.columns).fillna(0.0).values
-        fund_pnl = -(w_prev * sett).sum(axis=1)          # long pays positive funding
+        f = funding.reindex(columns=prices.columns).fillna(0.0)
+        pos = prices.index.searchsorted(f.index, side="left")
+        for i, row in zip(pos, f.values):
+            if i < n_bars:
+                sett[i] += row
 
-    net_r = gross_r - cost + fund_pnl
-    net_r.iloc[0] = 0.0
-    equity = (1 + net_r).cumprod()
-    bpy = infer_bars_per_year(prices.index)
+    held = np.zeros(n_assets)                            # realised weights held into bar t
+    gross_r = np.zeros(n_bars); turnover = np.zeros(n_bars); fund = np.zeros(n_bars)
+    realised = np.zeros_like(W)
+    rate = (fee_bps + slippage_bps) / 1e4
+    for t in range(n_bars):
+        r = rets[t]
+        g = float(held @ r)                              # portfolio return over bar t
+        gross_r[t] = g
+        fund[t] = -float(held @ sett[t])                 # long pays positive funding
+        drifted = held * (1 + r) / (1 + g) if g > -1 else np.zeros(n_assets)
+        target = W[t]
+        if rebalance_band > 0:
+            gap = np.abs(target - drifted)
+            must = (target == 0) | (np.sign(target) != np.sign(drifted)) | (gap > rebalance_band * np.abs(target))
+            new = np.where(must, target, drifted)
+        else:
+            new = target
+        turnover[t] = float(np.abs(new - drifted).sum())
+        held = new
+        realised[t] = new
 
-    res = Result(net_r, gross_r, equity, turnover, cost, fund_pnl, weights, bpy)
-    res.metrics = _metrics(net_r, equity, turnover, bpy)
+    cost = turnover * rate
+    net = gross_r - cost + fund
+    net[0] = 0.0
+    idx = prices.index
+    net_r = pd.Series(net, index=idx); equity = (1 + net_r).cumprod()
+    bpy = infer_bars_per_year(idx)
+    res = Result(net_r, pd.Series(gross_r, index=idx), equity, pd.Series(turnover, index=idx),
+                 pd.Series(cost, index=idx), pd.Series(fund, index=idx),
+                 pd.DataFrame(realised, index=idx, columns=prices.columns), bpy)
+    res.metrics = _metrics(net_r, equity, res.turnover, bpy)
     res.metrics["cost_drag_ann"] = float(cost.mean() * bpy)
-    res.metrics["funding_ann"] = float(fund_pnl.mean() * bpy)
+    res.metrics["funding_ann"] = float(fund.mean() * bpy)
     return res
 
 
