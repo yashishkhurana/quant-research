@@ -82,3 +82,19 @@ def test_metrics_present():
     res = run(p, BuyAndHold(rebalance=12).weights(p))
     for k in ["sharpe", "sortino", "max_drawdown", "ann_turnover", "cost_drag_ann"]:
         assert k in res.metrics
+
+
+def test_rebalance_bars_hold_drift_between_rebalances():
+    idx = pd.date_range("2024-01-01", periods=6, freq="h", tz="UTC")
+    prices = pd.DataFrame({"A": [100, 110, 121, 133.1, 146.41, 161.051], "B": 100.0}, index=idx)
+    w = pd.DataFrame({"A": 0.5, "B": 0.5}, index=idx)
+    rb = pd.Series([True, False, False, True, False, False], index=idx)
+    res = run(prices, w, fee_bps=0, slippage_bps=0, rebalance_bars=rb)
+    # no trading on held bars (bar 0 is the entry trade), A's weight drifts up until bar 3 resets it
+    assert res.turnover.iloc[1] == 0 and res.turnover.iloc[2] == 0
+    assert res.turnover.iloc[3] > 0
+    assert res.weights["A"].iloc[2] > 0.5 and abs(res.weights["A"].iloc[3] - 0.5) < 1e-12
+    # a forced exit still trades on a held bar
+    prices2 = prices.copy(); prices2.loc[idx[4]:, "B"] = np.nan
+    res2 = run(prices2, w, fee_bps=0, slippage_bps=0, rebalance_bars=rb)
+    assert res2.weights["B"].iloc[4] == 0 and res2.turnover.iloc[4] > 0

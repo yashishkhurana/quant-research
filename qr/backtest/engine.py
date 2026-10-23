@@ -77,12 +77,16 @@ def run(
     funding: pd.DataFrame | None = None,
     max_gross: float | None = None,
     rebalance_band: float = 0.0,
+    rebalance_bars: pd.Series | np.ndarray | None = None,
 ) -> Result:
     """`rebalance_band`: no-trade band as a fraction of the target weight. With 0 the book is
     rebalanced to the exact target every bar (charging price drift every bar). With e.g. 0.25 an
     asset is only traded when its realised weight is more than 25% of target away from target,
     or when the target itself changes sign / goes to zero. Realised weights then drift between
     trades, and the book that earns the next bar's return is the realised one, not the target.
+    `rebalance_bars`: optional bool per bar. On False bars the book holds its drifted weights and
+    only trades forced exits (target 0) and sign flips; on True bars it goes to target (subject to
+    the band). None = every bar is a rebalance bar.
     """
     prices = prices.sort_index()
     weights = weights.reindex(index=prices.index, columns=prices.columns).fillna(0.0)
@@ -95,6 +99,9 @@ def run(
         weights = weights.mul(scale, axis=0)
 
     rets = prices.pct_change(fill_method=None).fillna(0.0).values
+    rb = np.ones(len(prices), dtype=bool) if rebalance_bars is None else \
+        np.asarray(pd.Series(rebalance_bars).reindex(prices.index).fillna(False) if isinstance(rebalance_bars, pd.Series)
+                   else rebalance_bars, dtype=bool)
     W = weights.values
     n_bars, n_assets = W.shape
 
@@ -118,7 +125,10 @@ def run(
         fund[t] = -float(held @ sett[t])                 # long pays positive funding
         drifted = held * (1 + r) / (1 + g) if g > -1 else np.zeros(n_assets)
         target = W[t]
-        if rebalance_band > 0:
+        if not rb[t]:
+            must = (target == 0) | (np.sign(target) != np.sign(drifted))
+            new = np.where(must, target, drifted)
+        elif rebalance_band > 0:
             gap = np.abs(target - drifted)
             must = (target == 0) | (np.sign(target) != np.sign(drifted)) | (gap > rebalance_band * np.abs(target))
             new = np.where(must, target, drifted)
