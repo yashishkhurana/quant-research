@@ -6,7 +6,7 @@ backtester, a validation layer, and the strategies built on top of them.
 | # | Strategy | Horizon | Status | Note |
 | --- | --- | --- | --- | --- |
 | 1 | Research infrastructure (this scaffold) | — | in progress | — |
-| 2 | Intraday funding-rate carry | 8h | planned | `notes/01_carry.md` |
+| 2 | Funding-rate carry (hedged) | 8h | done: does not pay after costs, 2023–26 | `notes/01_carry.md` |
 | 3 | Intraday pairs stat arb | 5m bars | planned | `notes/02_pairs.md` |
 | 4 | Order-book microstructure + execution study | 1–30m | planned | `notes/03_microstructure.md` |
 | 5 | On-chain ML (triple-barrier, purged CV) | 1h | planned | `notes/04_onchain_ml.md` |

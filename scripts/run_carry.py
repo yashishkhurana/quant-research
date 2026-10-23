@@ -1,5 +1,5 @@
 """Funding carry: load data, run base case, parameter grid, walk-forward, stress windows; write
-reports/carry/* and notes/01_carry.md with the numbers filled in.
+reports/carry/* (incl. note_autogen.md, the rotation-backtest numbers). notes/01_carry.md is hand-written.
 
     python scripts/run_carry.py --start 2023-01-01 --universe data/universe.txt
 
@@ -240,7 +240,7 @@ The unhedged book can also trade the {m['n_perp_only']} contracts that never had
 - Not modelled: spot borrow when spot is unavailable, exchange-level margin on the short leg, and the capacity limit of alt spot depth. Capacity is bounded by the thinnest spot leg, not by the perp.
 """
     Path("notes").mkdir(exist_ok=True)
-    Path("notes/01_carry.md").write_text(note)
+    (OUT / "note_autogen.md").write_text(note)       # notes/01_carry.md is hand-written; do not overwrite it
 
 
 if __name__ == "__main__":
