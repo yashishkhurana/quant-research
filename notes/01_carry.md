@@ -174,7 +174,7 @@ The book's size is set by its least liquid holding, and the signal's holdings ar
 ## Reproduce
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]" && pytest                  # 45 tests
+pip install -e ".[dev]" && pytest                  # 50 tests
 bash scripts/fetch_carry_data.sh 2023-01-01        # universe + funding + hourly perp/spot (~1–2 h)
 # the first study run builds the funding and price matrices in data/processed/ (~15 min, once)
 python scripts/funding_persistence.py              # study 1
