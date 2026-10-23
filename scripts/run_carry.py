@@ -18,6 +18,7 @@ import pandas as pd
 
 from qr.backtest.engine import run
 from qr.backtest.report import tearsheet
+from qr.data.history import delisting_times
 from qr.data.store import read_range
 from qr.strategies.carry import CarryParams, build_weights, implied_leverage, run_with_risk
 from qr.validation import deflated_sharpe
@@ -26,10 +27,15 @@ OUT = Path("reports/carry")
 OUT.mkdir(parents=True, exist_ok=True)
 
 
+DELISTED = delisting_times()
+
+
 def load(bases: list[str], start: str, end: str):
     closes, fund, dvol = {}, {}, {}
     for b in bases:
         kp = read_range("raw", "binance", "klines_1h", f"{b}-PERP", start, end)
+        if b in DELISTED and not kp.empty:                 # frozen klines after delisting: cut them
+            kp = kp[kp.index < DELISTED[b]]
         ks = read_range("raw", "binance", "klines_1h", f"{b}-SPOT", start, end)
         f = read_range("raw", "binance", "funding", f"{b}-PERP", start, end)
         if kp.empty or f.empty:

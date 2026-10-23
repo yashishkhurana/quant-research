@@ -30,10 +30,30 @@ def _one(base: str, market: str, start: str, end: str, interval: str) -> pd.Data
     return df[~df.index.duplicated(keep="last")][[c for c in COLUMNS if c in df.columns]]
 
 
+def mask_delisted(m: pd.DataFrame, times: dict[str, pd.Timestamp]) -> pd.DataFrame:
+    """NaN from each base's delisting time on. Binance serves frozen perp klines after delisting;
+    the backtester force-closes on NaN, so this is what makes a delisting visible to it."""
+    m = m.copy()
+    for b, t in times.items():
+        if b in m.columns:
+            m.loc[m.index >= t, b] = float("nan")
+    return m
+
+
 def load_kline_matrix(bases: list[str], market: str, col: str, start: str, end: str,
                       interval: str = "1h", cache: bool = True) -> pd.DataFrame:
     """market = 'PERP' or 'SPOT'. Columns of the result = bases that have data. Cache is rebuilt
-    if it lacks a requested base that has data on disk; delete the files after a new download."""
+    if it lacks a requested base that has data on disk; delete the files after a new download.
+    PERP matrices are cut at each contract's delisting time (see mask_delisted)."""
+    m = _load_kline_matrix(bases, market, col, start, end, interval, cache)
+    if market == "PERP":
+        from qr.data.history import delisting_times
+        m = mask_delisted(m, delisting_times())
+    return m
+
+
+def _load_kline_matrix(bases: list[str], market: str, col: str, start: str, end: str,
+                       interval: str, cache: bool) -> pd.DataFrame:
     path = _path(market, col, start, end, interval)
     if cache and path.exists():
         df = pd.read_parquet(path)

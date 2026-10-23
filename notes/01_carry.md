@@ -2,7 +2,7 @@
 
 *The first of a planned set of notes on Binance perps. It tests the simplest delta-neutral carry book before anything is built on top of it, and it rules it out.*
 
-**One line:** hedged funding carry (long spot / short perp) on Binance does not pay after costs in 2023–26: rotating into high-funding coins spends the income on turnover, holding liquid coins at the default rate loses −6.2% a year because below-default funding outweighs it, and the above-default spells that funded the trade in 2023–24 became about 20× rarer in 2025–26, with the most liquid coins hit hardest.
+**One line:** hedged funding carry (long spot / short perp) on Binance does not pay after costs in 2023–26: rotating into high-funding coins spends the income on turnover, holding liquid coins at the default rate loses −4.3% a year because below-default funding outweighs it, and the above-default spells that funded the trade in 2023–24 became about 20× rarer in 2025–26, with the most liquid coins hit hardest.
 
 ## Hypothesis
 When leveraged longs crowd a perp, it trades above spot and longs pay shorts funding. A short perp hedged with long spot collects that funding without directional exposure. The edge is a premium for taking the other side of leverage demand, so it should exist only while that demand outweighs the capital willing to supply it.
@@ -14,6 +14,7 @@ Binance's funding has a floor-like default: an interest component of 0.01% per 8
 - Universe: every USDT perp Binance has listed (655, including 133 delisted). 447 have a spot market and so can be hedged; 89 of those are delisted contracts (FTT, FTM, WAVES, MKR, OCEAN, AGIX, …), so the sample includes the casualties. Perp-only coins are excluded from every hedged study.
 - Settlement intervals differ: at the end of the sample 509 coins settle every 4h, 134 every 8h, 12 every 1–2h, and 169 dropped to 1h at some point (Binance does this when funding is at its cap). All funding is put on fixed 8h UTC windows by summing the settlements inside each window (`qr/data/funding.py`); the default is 0.01% per 8h window at every interval (0.005% per 4h settlement, 0.00125% per 1h).
 - Liquidity is point in time: trailing 30-day perp dollar volume on completed bars only.
+- Binance keeps serving perp klines after a contract is delisted, with a frozen close. Perp prices are cut at each contract's delisting time (Binance's `deliveryDate`, 134 contracts), so a delisting force-closes the position in the backtester instead of leaving a frozen perp hedged against live spot.
 
 ## Method
 Three studies, each answering one question:
@@ -52,15 +53,15 @@ An earlier rotation backtest (top 10 by trailing funding, re-ranked every 8h) re
 
 | | 2023–24 | 2025–26 | Full |
 | --- | --- | --- | --- |
-| Ann. return (net) | +2.3% | −14.9% | −6.2% |
-| Ann. vol | 7.3% | 3.1% | 5.7% |
-| Sharpe | 0.35 | −5.16 | −1.10 |
-| Max drawdown | −9.3% | −25.5% | −25.5% |
-| Price / basis PnL / yr | +0.5% | −5.3% | −2.3% |
-| Funding / yr | +3.5% | −9.6% | −2.7% |
+| Ann. return (net) | +2.3% | −11.2% | −4.3% |
+| Ann. vol | 7.3% | 2.0% | 5.5% |
+| Sharpe | 0.35 | −5.99 | −0.78 |
+| Max drawdown | −9.3% | −19.7% | −19.7% |
+| Price / basis PnL / yr | +0.5% | −1.0% | −0.2% |
+| Funding / yr | +3.5% | −9.7% | −2.8% |
 | from settlements at default | +4.7% | +3.4% | +4.1% |
-| from settlements above default | +7.7% | +0.4% | +4.3% |
-| from settlements below default | −8.9% | −13.3% | −11.0% |
+| from settlements above default | +7.7% | +0.3% | +4.2% |
+| from settlements below default | −8.9% | −13.4% | −11.0% |
 | Costs / yr | −1.4% | −1.2% | −1.3% |
 | Turnover / yr | 20× | 17× | 19× |
 

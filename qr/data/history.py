@@ -59,6 +59,24 @@ def list_symbols(include_delisted: bool = True) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def delisting_times(cache: bool = True) -> dict[str, pd.Timestamp]:
+    """Base -> delisting time (deliveryDate) for every delisted USDT perp. Binance keeps serving
+    perp klines after delisting with a frozen close, so loaders must cut perp prices here, or the
+    backtester (which force-closes on NaN) never sees the delisting. Cached as JSON."""
+    import json
+    from qr.data.store import ROOT
+    path = ROOT / "processed" / "binance" / "delistings.json"
+    if cache and path.exists():
+        return {k: pd.Timestamp(v) for k, v in json.load(open(path)).items()}
+    df = list_symbols(include_delisted=True)
+    dead = df[(df["status"] != "TRADING") & df["delivery"].notna()
+              & (df["delivery"] < pd.Timestamp.now(tz="UTC"))]
+    out = dict(zip(dead["base"], dead["delivery"]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    json.dump({k: v.isoformat() for k, v in out.items()}, open(path, "w"), indent=0)
+    return out
+
+
 def all_perp_bases(onboarded_before: str | None = None) -> list[str]:
     """Every USDT perp Binance has listed, delisted ones included (status != TRADING), so the
     universe is not selected on survival. Optionally keep only contracts listed before a date."""
