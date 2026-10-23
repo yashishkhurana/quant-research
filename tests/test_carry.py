@@ -72,3 +72,14 @@ def test_point_in_time_universe_uses_only_past_volume():
     assert m["B"].iloc[90] and not m["A"].iloc[90]
     assert not m["B"].iloc[59]                          # the bar before it turns liquid: not yet
     assert not m["C"].any()
+
+
+def test_unhedged_has_no_spot_leg_and_trades_perp_only_coins():
+    prices, funding = _world()
+    prices = prices.drop(columns=["CCC-SPOT"])          # CCC has no spot market
+    funding["CCC"] = 0.0006                               # but pays well
+    w_h = build_weights(prices, funding, CarryParams(lookback=3, hedged=True))
+    w_u = build_weights(prices, funding, CarryParams(lookback=3, hedged=False))
+    assert (w_h["CCC-PERP"] == 0).all()                   # hedged: cannot trade it
+    assert (w_u["CCC-PERP"].iloc[50:] < 0).all()          # unhedged: shorts it
+    assert (w_u.filter(like="-SPOT") == 0).all().all()

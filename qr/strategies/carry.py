@@ -46,6 +46,7 @@ class CarryParams:
     cooldown_bars: int = 24 * 3  # bars (hours) flat after a kill
     universe_n: int = 40         # tradeable set = top N by trailing dollar volume, point in time
     volume_window: int = 24 * 30 # bars of trailing volume used for that rank
+    hedged: bool = True          # False = short perp only, no spot leg (the "unhedged carry" people ran)
 
 
 def point_in_time_universe(dollar_volume: pd.DataFrame, n: int, window: int) -> pd.DataFrame:
@@ -70,12 +71,14 @@ def build_weights(prices: pd.DataFrame, funding: pd.DataFrame, p: CarryParams,
     tradeable set at each bar is the top `p.universe_n` by trailing volume (point in time).
     Returns weights on the same columns as prices."""
     bases = sorted({c.split("-")[0] for c in prices.columns if c.endswith("-PERP")})
-    bases = [b for b in bases if f"{b}-SPOT" in prices.columns and b in funding.columns]
+    bases = [b for b in bases if b in funding.columns and (not p.hedged or f"{b}-SPOT" in prices.columns)]
 
     carry = annualised_carry(funding[bases], p.lookback)
     carry = carry.reindex(prices.index, method="ffill")          # last settled value, no look-ahead
 
-    tradeable = prices[[f"{b}-PERP" for b in bases]].notna().values & prices[[f"{b}-SPOT" for b in bases]].notna().values
+    tradeable = prices[[f"{b}-PERP" for b in bases]].notna().values.copy()
+    if p.hedged:                                                  # the hedge needs a spot price too
+        tradeable &= prices[[f"{b}-SPOT" for b in bases]].notna().values
     if dollar_volume is not None:
         in_univ = point_in_time_universe(dollar_volume.reindex(columns=bases).reindex(prices.index),
                                          p.universe_n, p.volume_window)
@@ -102,8 +105,9 @@ def build_weights(prices: pd.DataFrame, funding: pd.DataFrame, p: CarryParams,
 
     w = pd.DataFrame(0.0, index=prices.index, columns=prices.columns)
     for b in bases:
-        w[f"{b}-SPOT"] = leg[b]
         w[f"{b}-PERP"] = -leg[b]
+        if p.hedged:
+            w[f"{b}-SPOT"] = leg[b]
 
     gross = w.abs().sum(axis=1)
     scale = (p.max_gross / gross).clip(upper=1.0).fillna(1.0)

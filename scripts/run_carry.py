@@ -32,11 +32,12 @@ def load(bases: list[str], start: str, end: str):
         kp = read_range("raw", "binance", "klines_1h", f"{b}-PERP", start, end)
         ks = read_range("raw", "binance", "klines_1h", f"{b}-SPOT", start, end)
         f = read_range("raw", "binance", "funding", f"{b}-PERP", start, end)
-        if kp.empty or ks.empty or f.empty:
-            print(f"skip {b}: perp={len(kp)} spot={len(ks)} funding={len(f)}")
+        if kp.empty or f.empty:
+            print(f"skip {b}: perp={len(kp)} funding={len(f)}")
             continue
         closes[f"{b}-PERP"] = kp["close"]
-        closes[f"{b}-SPOT"] = ks["close"]
+        if not ks.empty:                       # perp-only coins stay in: tradeable unhedged, never hedged
+            closes[f"{b}-SPOT"] = ks["close"]
         fund[b] = f["rate"]
         dvol[b] = kp["quote_vol"] if "quote_vol" in kp else kp["close"] * kp["volume"]
     prices = pd.DataFrame(closes).sort_index()
@@ -84,6 +85,20 @@ def main(a):
     res_nr = run(prices, build_weights(prices, funding, base, dvol), fee_bps=4, slippage_bps=3,
                  funding=f_perp, max_gross=base.max_gross)
     m["sharpe_no_kill"] = res_nr.metrics["sharpe"]; m["max_dd_no_kill"] = res_nr.metrics["max_drawdown"]
+    m["n_perp_only"] = int(sum(1 for c in prices.columns if c.endswith("-PERP") and c.replace("-PERP", "-SPOT") not in prices.columns))
+
+    # unhedged variant: same signal, short perp only. This is the trade most "funding carry" PnL in
+    # 2024-25 actually came from, and it has the spot leg's protection removed.
+    res_u = rr(prices, funding, CarryParams(universe_n=a.universe_n, hedged=False))
+    tearsheet(res_u, "Funding carry, UNHEDGED (short perp only)", out=OUT / "tearsheet_unhedged.png")
+    wk = lambda r: (1 + r).resample("W").prod() - 1
+    m.update({"unhedged_sharpe": res_u.metrics["sharpe"], "unhedged_ann_return": res_u.metrics["ann_return"],
+              "unhedged_max_dd": res_u.metrics["max_drawdown"], "unhedged_ann_vol": res_u.metrics["ann_vol"],
+              "unhedged_worst_week": float(wk(res_u.returns).min()),
+              "unhedged_worst_week_date": str(wk(res_u.returns).idxmin().date()),
+              "unhedged_kill_bars": res_u.metrics.get("kill_bars", 0),
+              "hedged_worst_week": float(wk(res.returns).min()),
+              "hedged_worst_week_date": str(wk(res.returns).idxmin().date())})
 
     # parameter grid: lookback x entry threshold (full sample; this is the in-sample picture)
     grid_lb, grid_entry = [3, 6, 9, 15, 21], [0.05, 0.10, 0.15, 0.20, 0.30]
@@ -181,6 +196,21 @@ Parameter stability, in-sample Sharpe by lookback (settlements) and entry thresh
 Stress windows (base parameters):
 
 {st_md}
+Hedged vs unhedged, same signal and risk layer:
+
+| | Hedged (spot long / perp short) | Unhedged (perp short only) |
+| --- | --- | --- |
+| Ann. return (net) | {pct(m['ann_return'])} | {pct(m['unhedged_ann_return'])} |
+| Ann. vol | {pct(m['ann_vol'])} | {pct(m['unhedged_ann_vol'])} |
+| Sharpe | {f2(m['sharpe'])} | {f2(m['unhedged_sharpe'])} |
+| Max drawdown | {pct(m['max_drawdown'])} | {pct(m['unhedged_max_dd'])} |
+| Worst week | {pct(m['hedged_worst_week'])} ({m['hedged_worst_week_date']}) | {pct(m['unhedged_worst_week'])} ({m['unhedged_worst_week_date']}) |
+| Bars flat on kill-switch | {m.get('kill_bars', 0)} | {m['unhedged_kill_bars']} |
+
+The unhedged book can also trade the {m['n_perp_only']} contracts that never had a Binance spot market (mostly 2024-25 meme and launch tokens), which is where much of the real "funding carry" PnL of that period came from, and where the squeezes were.
+
+![unhedged](../reports/carry/tearsheet_unhedged.png)
+
 ## Validation
 {len(tbl.values.ravel())} parameter combinations were tried. Deflated Sharpe: probability the base-case Sharpe beats the expected best of {m['dsr_n_trials']} zero-skill trials is {m['dsr_psr']:.0%} (benchmark Sharpe after deflation {f2(m['dsr_sr0_ann'])}). Walk-forward, refitting lookback and threshold on six months and trading the next two: out-of-sample Sharpe {f2(m.get('wf_sharpe', float('nan')))}, annualised return {pct(m.get('wf_ann_return', float('nan')))}, max drawdown {pct(m.get('wf_max_dd', float('nan')))} over {m.get('wf_bars', 0)} hours.
 
