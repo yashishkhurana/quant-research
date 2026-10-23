@@ -1,5 +1,5 @@
 """Order-flow signal study on our own collected book + trades. Writes reports/flow/* and
-notes/03_flow.md with the numbers filled in.
+reports/flow/note_autogen.md with the numbers filled in (notes/03_flow.md is hand-written).
 
     python scripts/run_flow.py --exchange binance --symbols BTC-PERP ETH-PERP SOL-PERP --bar 1min
 """
@@ -44,12 +44,19 @@ def main(a):
         meta[sym] = {"snapshots": int(len(book)), "trades": int(len(trades)), "bars": int(len(feats)),
                      "from": str(feats.index[0]), "to": str(feats.index[-1]),
                      "median_spread_bps": float(feats["spread_bps"].median()),
-                     "snapshots_per_bar": float(feats["n_snap"].median())}
+                     "snapshots_per_bar": float(feats["n_snap"].median()),
+                     "hours": float(len(feats) / 60 * pd.Timedelta(a.bar).total_seconds() / 60),
+                     "segments": int(feats["segment"].nunique()),
+                     "longest_segment_h": float(feats.groupby("segment").size().max() * pd.Timedelta(a.bar).total_seconds() / 3600),
+                     # bars where the 120-bar z-score is warm and the 30-bar forward return exists, both within a segment
+                     "usable_bars": int((zscore(feats["depth_imb"], 120, feats["segment"]).notna()
+                                         & forward_returns(feats["mid"], (30,), feats["segment"])[30].notna()).sum())}
         s = signal_study(feats); s.insert(0, "symbol", sym); studies.append(s)
 
         # decile plot for the best (feature, horizon) by |t|
         best = s.iloc[s["t_nw"].abs().idxmax()]
-        z = zscore(feats[best["feature"]]); fr = forward_returns(feats["mid"], (int(best["horizon"]),)).iloc[:, 0] * 1e4
+        z = zscore(feats[best["feature"]], 120, feats["segment"])
+        fr = forward_returns(feats["mid"], (int(best["horizon"]),), feats["segment"]).iloc[:, 0] * 1e4
         d = pd.concat([z.rename("z"), fr.rename("y")], axis=1).dropna()
         dec = pd.qcut(d["z"], 10, labels=False, duplicates="drop")
         prof = d["y"].groupby(dec).mean()
@@ -84,7 +91,7 @@ def write_note(study: pd.DataFrame, strat: pd.DataFrame, meta: dict, a):
     f2 = lambda x: f"{x:.2f}"
     syms = list(meta)
     span = f"{min(m['from'] for m in meta.values())[:16]} to {max(m['to'] for m in meta.values())[:16]} UTC"
-    hours = sum(m["bars"] for m in meta.values()) / 60
+    hours = min(m["hours"] for m in meta.values())                 # per symbol, not summed across symbols
     # best per symbol by |t|
     best = study.loc[study.groupby("symbol")["t_nw"].apply(lambda s: s.abs().idxmax())]
     tbl = "| Symbol | Feature | Horizon (bars) | Slope, bps per 1 SD | t (NW) | R² | Top−bottom decile, bps | n |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n"
@@ -102,7 +109,7 @@ def write_note(study: pd.DataFrame, strat: pd.DataFrame, meta: dict, a):
     strongest = best.iloc[best["t_nw"].abs().argmax()]
     note = f"""# Order-flow signals on {a.exchange} perps, from our own book data
 
-**One line:** on {hours:.0f} hours of self-collected L2 snapshots and trades ({', '.join(syms)}), top-of-book order-flow imbalance predicts the next {int(strongest['horizon'])}-bar return with t = {strongest['t_nw']:+.1f} and a top-minus-bottom decile spread of {strongest['top_minus_bottom_decile_bps']:+.1f} bps; after 2 bps of cost per side the best one-feature strategy's edge {'survives' if (two['net_return'] > 0).any() else 'does not survive'}.
+**One line:** on {hours:.0f} hours per symbol of self-collected L2 snapshots and trades ({', '.join(syms)}; {max(m['segments'] for m in meta.values())} contiguous segments, longest {max(m['longest_segment_h'] for m in meta.values()):.1f} h, {min(m['usable_bars'] for m in meta.values())} usable bars), top-of-book order-flow imbalance predicts the next {int(strongest['horizon'])}-bar return with t = {strongest['t_nw']:+.1f} and a top-minus-bottom decile spread of {strongest['top_minus_bottom_decile_bps']:+.1f} bps; after 2 bps of cost per side the best one-feature strategy's edge {'survives' if (two['net_return'] > 0).any() else 'does not survive'}.
 
 This is a signal study on days of data, not a backtest on years. The t-stats are informative about whether the effect exists at this timescale; the strategy numbers are not an expected return.
 
@@ -138,7 +145,7 @@ At 5 bps per side:
 - OFI from 100 ms snapshots undercounts flow between snapshots; a diff-based (not snapshot-based) book feed would sharpen it.
 """
     Path("notes").mkdir(exist_ok=True)
-    Path("notes/03_flow.md").write_text(note)
+    (OUT / "note_autogen.md").write_text(note)        # notes/03_flow.md is hand-written; do not overwrite it
 
 
 if __name__ == "__main__":

@@ -15,6 +15,11 @@ R^2, and the decile spread of forward returns. Then a one-feature strategy: sign
 z-score when |z| > threshold, hold h bars, with costs, through the engine.
 
 This is a signal study on days of data, not a backtest on years. The note must say so.
+
+Gaps: the collector disconnects (reconnects, a sleeping host). Nothing is allowed to join data
+across a gap: OFI events after a snapshot gap are zeroed, bars carry a `segment` id that changes
+at every missing bar, and z-scores, forward returns and strategy holds are computed within a
+segment only. Bars whose trailing window or forward horizon would cross a gap come out NaN.
 """
 from __future__ import annotations
 
@@ -26,12 +31,16 @@ def _top(book: pd.DataFrame):
     return book["bid_px_0"], book["bid_sz_0"], book["ask_px_0"], book["ask_sz_0"]
 
 
-def ofi_events(book: pd.DataFrame) -> pd.Series:
+def ofi_events(book: pd.DataFrame, max_gap_s: float = 5.0) -> pd.Series:
+    """Per-snapshot OFI. The event at the first snapshot after a gap longer than `max_gap_s` is
+    zeroed: comparing it with a book from before a disconnect is not order flow."""
     b, qb, a, qa = _top(book)
     b1, qb1, a1, qa1 = b.shift(1), qb.shift(1), a.shift(1), qa.shift(1)
     e = (np.where(b >= b1, qb, 0) - np.where(b <= b1, qb1, 0)
          - np.where(a <= a1, qa, 0) + np.where(a >= a1, qa1, 0))
-    return pd.Series(e, index=book.index).fillna(0.0)
+    e = pd.Series(e, index=book.index).fillna(0.0)
+    gap = book.index.to_series().diff().dt.total_seconds() > max_gap_s
+    return e.mask(gap.values, 0.0)
 
 
 def depth_imbalance(book: pd.DataFrame, levels: int = 5) -> pd.Series:
@@ -53,7 +62,8 @@ def spread_bps(book: pd.DataFrame) -> pd.Series:
 
 
 def bar_features(book: pd.DataFrame, trades: pd.DataFrame, rule: str = "1min") -> pd.DataFrame:
-    """Resample snapshot-level features to a bar clock. Bars with no snapshot are dropped."""
+    """Resample snapshot-level features to a bar clock. Bars with no snapshot are dropped, and
+    `segment` increments wherever a bar is missing, so each segment is contiguous in time."""
     mid = ((book["ask_px_0"] + book["bid_px_0"]) / 2)
     feats = pd.DataFrame({
         "ofi": ofi_events(book).resample(rule).sum(),
@@ -68,19 +78,25 @@ def bar_features(book: pd.DataFrame, trades: pd.DataFrame, rule: str = "1min") -
         vol = trades["qty"].resample(rule).sum()
         feats["tfi"] = (signed.resample(rule).sum() / vol.replace(0, np.nan))
         feats["volume"] = vol
-    return feats[feats["n_snap"] > 0]
+    feats = feats[feats["n_snap"] > 0].copy()
+    step = pd.Timedelta(rule)
+    feats["segment"] = (feats.index.to_series().diff() > step).cumsum().values
+    return feats
 
 
-def zscore(x: pd.Series, window: int = 120) -> pd.Series:
-    """Trailing z-score; uses only past bars."""
-    m = x.rolling(window, min_periods=window // 2).mean()
-    s = x.rolling(window, min_periods=window // 2).std(ddof=1)
+def zscore(x: pd.Series, window: int = 120, segment: pd.Series | None = None) -> pd.Series:
+    """Trailing z-score; uses only past bars, and only bars in the same segment."""
+    g = x.groupby(segment.values) if segment is not None else x.groupby(np.zeros(len(x)))
+    m = g.transform(lambda v: v.rolling(window, min_periods=window // 2).mean())
+    s = g.transform(lambda v: v.rolling(window, min_periods=window // 2).std(ddof=1))
     return (x - m) / s.replace(0, np.nan)
 
 
-def forward_returns(mid: pd.Series, horizons=(1, 5, 15, 30)) -> pd.DataFrame:
+def forward_returns(mid: pd.Series, horizons=(1, 5, 15, 30), segment: pd.Series | None = None) -> pd.DataFrame:
+    """Log mid return h bars ahead; NaN where t+h is in another segment (across a gap)."""
     lm = np.log(mid)
-    return pd.DataFrame({h: lm.shift(-h) - lm for h in horizons})
+    g = lm.groupby(segment.values) if segment is not None else lm.groupby(np.zeros(len(lm)))
+    return pd.DataFrame({h: g.shift(-h) - lm for h in horizons})
 
 
 def newey_west_t(x: np.ndarray, y: np.ndarray, lags: int) -> tuple[float, float, float]:
@@ -103,12 +119,13 @@ def newey_west_t(x: np.ndarray, y: np.ndarray, lags: int) -> tuple[float, float,
 
 def signal_study(feats: pd.DataFrame, features=("ofi", "depth_imb", "micro_dev", "tfi"),
                  horizons=(1, 5, 15, 30), z_window: int = 120) -> pd.DataFrame:
-    fr = forward_returns(feats["mid"], horizons) * 1e4            # bps
+    seg = feats["segment"] if "segment" in feats else None
+    fr = forward_returns(feats["mid"], horizons, seg) * 1e4       # bps
     rows = []
     for f in features:
         if f not in feats:
             continue
-        z = zscore(feats[f], z_window)
+        z = zscore(feats[f], z_window, seg)
         for h in horizons:
             d = pd.concat([z.rename("z"), fr[h].rename("y")], axis=1).dropna()
             if len(d) < 200:
@@ -126,13 +143,20 @@ def flow_strategy_weights(feats: pd.DataFrame, feature: str, horizon: int, thres
                           z_window: int = 120) -> pd.Series:
     """Enter sign(z) when |z| > threshold, hold `horizon` bars (no re-entry while held). Weight in
     {-1, 0, +1}; the engine prices it on `mid` and charges turnover."""
-    z = zscore(feats[feature], z_window).values
+    seg = feats["segment"] if "segment" in feats else pd.Series(0, index=feats.index)
+    z = zscore(feats[feature], z_window, seg).values
+    sv = seg.values
     w = np.zeros(len(z))
     i = 0
+    # weight at t earns t -> t+1, so a bar may be held only if bar t+1 is in the same segment
+    holdable = np.r_[sv[1:] == sv[:-1], False]
     while i < len(z):
-        if not np.isnan(z[i]) and abs(z[i]) > threshold:
-            w[i:i + horizon] = np.sign(z[i])
-            i += horizon
+        if not np.isnan(z[i]) and abs(z[i]) > threshold and holdable[i]:
+            end = i
+            while end < min(i + horizon, len(z)) and holdable[end] and sv[end] == sv[i]:
+                end += 1
+            w[i:end] = np.sign(z[i])
+            i = end
         else:
             i += 1
     return pd.Series(w, index=feats.index)
