@@ -1,5 +1,7 @@
 # Funding-rate carry on Binance perps
 
+*The first of a planned set of notes on Binance perps. It tests the simplest delta-neutral carry book before anything is built on top of it, and it rules it out.*
+
 **One line:** hedged funding carry (long spot / short perp) on Binance does not pay after costs in 2023–26: rotating into high-funding coins spends the income on turnover, holding liquid coins at the default rate loses −6.2% a year because below-default funding outweighs it, and the above-default spells that funded the trade in 2023–24 became about 20× rarer in 2025–26, with the most liquid coins hit hardest.
 
 ## Hypothesis
@@ -44,7 +46,7 @@ The rule *enter above 50% APR, hold until back at default* was chosen from this 
 
 Spells also became rarer. The share of listed coin-windows above default fell about 20× for both settlement intervals (8h coins 13.9% → 0.7%, 4h coins 25.2% → 1.4%), while the number of listed hedgeable coins rose from 218 to 365. My first explanation, that 4h settlement shortened spells, is rejected: within each period 4h coins have slightly *longer* spells than 8h coins (2025–26 mean 2.5 vs 2.0 windows), and 8h coins, which never changed interval, collapsed just as much.
 
-The rotation backtest (top 10 by trailing funding among the top 40 by volume, re-ranked every 8h) showed the same thing in PnL: funding income +8.3% a year against costs of −28.5% a year, Sharpe −2.30, with almost all turnover coming from selection changes. That run predates the funding-unit and decision-clock fixes in `qr/strategies/carry.py`, so its exact numbers are superseded; the persistence results above are the cleaner evidence and do not depend on it.
+An earlier rotation backtest (top 10 by trailing funding, re-ranked every 8h) reached the same conclusion, with costs exceeding the funding collected; its exact figures predate two fixes in `qr/strategies/carry.py` (funding units and the decision clock) and are not reported.
 
 ### 2. Holding liquid coins at the default does not pay either
 
@@ -100,7 +102,10 @@ Below-default funding rose in every bucket and is monotone in liquidity in both 
 
 ## Reproduce
 ```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]" && pytest                  # 32 tests
 bash scripts/fetch_carry_data.sh 2023-01-01        # universe + funding + hourly perp/spot (~1–2 h)
+# the first study run builds the funding and price matrices in data/processed/ (~15 min, once)
 python scripts/funding_persistence.py              # study 1
 python scripts/default_carry.py --n 20             # study 2 -> reports/default_carry/
 python scripts/funding_by_volume.py --min-windows 30   # study 3
