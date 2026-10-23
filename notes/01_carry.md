@@ -47,7 +47,9 @@ The rule *enter above 50% APR, hold until back at default* was chosen from this 
 
 Spells also became rarer. The share of listed coin-windows above default fell about 20× for both settlement intervals (8h coins 13.9% → 0.7%, 4h coins 25.2% → 1.4%), while the number of listed hedgeable coins rose from 218 to 365. My first explanation, that 4h settlement shortened spells, is rejected: within each period 4h coins have slightly *longer* spells than 8h coins (2025–26 mean 2.5 vs 2.0 windows), and 8h coins, which never changed interval, collapsed just as much.
 
-An earlier rotation backtest (top 10 by trailing funding, re-ranked every 8h) reached the same conclusion, with costs exceeding the funding collected; its exact figures predate two fixes in `qr/strategies/carry.py` (funding units and the decision clock) and are not reported.
+The rotation backtest shows the same thing in PnL. Book: top 10 by trailing 9-window funding among the top 40 by trailing volume, entry above 10% APR and exit below 3%, decisions at 8h window ends, 25% no-trade band, 8% drawdown kill switch, 2.0× gross, 7 bps per leg. It collected **+11.7% a year in funding and paid −35.8% a year in costs**: net −20.7% a year, Sharpe −6.8, max drawdown −58.7%, turnover 511× a year, almost all of it from selection changes (0.061 per bar from target changes against 0.058 total). All 25 parameter combinations are negative (Sharpe −18.2 to −0.3), and walk-forward out of sample returns −3.1% a year. The unhedged version (short perp only, perp-only coins allowed) roughly breaks even (−0.03% a year) with a −78% max drawdown and a −20% worst week (week ending 2025-10-12).
+
+![rotation carry](../reports/carry/tearsheet.png)
 
 ### 2. Holding liquid coins at the default does not pay either
 
