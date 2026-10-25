@@ -1,7 +1,7 @@
 # quant-research
 
-Mid-frequency crypto quant research on perpetual futures: a shared data pipeline, an honest
-backtester, a validation layer, and the strategies built on top of them.
+Crypto perp research: data pipeline, backtester, and one note per study. Binance, Bybit and
+Hyperliquid, 2023 to now.
 
 | # | Study | Horizon | Status | Note |
 | --- | --- | --- | --- | --- |
@@ -24,57 +24,36 @@ contracts. If a strategy loses money after costs, the note says so.
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 pytest                      # 74 tests
-python scripts/smoke.py     # synthetic end-to-end run -> reports/smoke_tearsheet.png
 ```
 
-## Start collecting order-book data (do this on day 1)
+Each note ends with the commands that reproduce it.
 
-```bash
-nohup python -m qr.data.collector --symbols BTC ETH SOL --exchanges binance hyperliquid \
-      > logs/collector.log 2>&1 &
-```
+## Data
 
-Trades and 10-level book snapshots land in `data/raw/<exchange>/{trades,book}/<SYM>-PERP/<day>.parquet`,
-flushed every 30 s. Check gaps with `python -c "from qr.data.store import available_days as a; print(a('raw','binance','book','BTC-PERP'))"`.
-Under tmux or a systemd unit it survives logout.
-
-## Historical data
-
-```bash
-python -m qr.data.history universe --top 50                       # top 50 perps by 24h volume
-python -m qr.data.history klines  --symbols BTC ETH SOL --start 2023-01-01
-python -m qr.data.history funding --symbols BTC ETH SOL --start 2023-01-01
-python -m qr.data.history oi      --symbols BTC --start 2025-09-20   # ~30 days back only
-```
-
-`history.list_symbols(include_delisted=True)` returns delisted contracts with onboard and
-delivery dates; build universes from it so the tokens that went to zero stay in the backtest.
+- Binance perps and spot: `python -m qr.data.history {universe-all,klines,spot,funding} ...`. `list_symbols(include_delisted=True)` keeps delisted contracts in the universe.
+- Bybit: `python -m qr.data.bybit_history {funding,klines,oi} --start 2024-01-01`.
+- Hyperliquid: `python -m qr.data.hl_history {funding,candles,snapshot}`. Its candle API only goes back ~5,000 hours.
+- Second source (CryptoHFTData, open interest and mark prices from mid-2025): `qr/data/chd.py`, key in `CHD_API_KEY`.
+- Own order-book and trade collector, Binance and Hyperliquid: `python -m qr.data.collector --symbols BTC ETH SOL`. Writes `data/raw/<exchange>/{trades,book}/<SYM>-PERP/<day>.parquet` every 30 s. The host must not sleep (`caffeinate -is` on a Mac).
 
 ## Layout
 
 ```
 qr/
-  data/
-    store.py        Parquet store (one UTC day per file, dedupe on append; CSV fallback without pyarrow)
-    collector.py    Binance + Hyperliquid websocket collector: trades + L2 book
-    history.py      Binance REST loaders: 1m klines, funding, open interest, universe
-    bars.py         time / volume / dollar bars from trades; kline resampling
-  backtest/
-    engine.py       vectorised weight-based backtester: fees, slippage, funding, delistings, metrics
-    report.py       tearsheet (equity, drawdown, turnover, exposure) + monthly table
-  strategies/
-    base.py         Strategy protocol, BuyAndHold and Flat benchmarks
-  signals/          order-flow features (flow.py)
-  validation/       deflated Sharpe, walk-forward, parameter-stability grid
-tests/              engine invariants: zero strategy = zero PnL, no look-ahead, costs, funding sign, delisting
-notes/              one 2-page research note per strategy (template in notes/TEMPLATE.md)
-scripts/            smoke.py and later per-strategy runners
+  data/        store, collector, Binance/Bybit/Hyperliquid loaders, vendor client, funding on 8h windows, cross-venue name matching
+  backtest/    weight-based engine (fees, slippage, funding, delistings), PNG and HTML tearsheets
+  strategies/  carry, cross-venue, multi-venue
+  signals/     order-flow features
+  validation/  deflated Sharpe, walk-forward, parameter grid
+  capacity.py  participation caps, square-root impact
+  risk.py      vol-scaled stop, liquidation model
+scripts/       one runner per study
+notes/         one note per study; *_params.md files are written and committed before the run
 ```
 
 ## Backtester contract
 
 The weight at bar *t* is decided with information up to *t* and earns the return from *t* to
-*t+1*. The engine does not lag signals for you; lag them in the strategy so the look-ahead
-boundary is visible in the code. Long perps pay positive funding. Untradeable prices (NaN)
-force-close the position at the last valid price and the exit is charged. See
-`tests/test_engine.py` for the invariants this is held to.
+*t+1*. The engine does not lag signals; strategies do, so the look-ahead boundary is visible in
+the code. Long perps pay positive funding. A missing price force-closes the position at the last
+valid price and charges the exit. `tests/test_engine.py` holds the invariants.

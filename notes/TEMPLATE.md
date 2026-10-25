@@ -30,4 +30,4 @@ Equity curve, drawdown, parameter-stability heatmap, walk-forward vs in-sample.
 Trials run, deflated Sharpe, walk-forward out-of-sample, stress windows.
 
 ## What broke
-The honest part. What you tried that failed, what the results are sensitive to, what you would need to deploy this.
+What failed, what the result is sensitive to, what deploying it would need.

@@ -159,31 +159,31 @@ The least liquid holding sets the book's size, and the holdings are small. LSK, 
 Restricting to windows where every held name has OI (88% hedged, 78% unhedged) gives $0.85m and $0.47m. The check said above to be impossible over the backtest now runs over its last 16 months: the hedged book's median is $0.89m, inside the snapshot's $0.3–1.7m range, and in the snapshot week itself it is $0.86m, set by the same names (MARSCOIN, LSK). The unhedged $18m above is wrong, not just an upper bound: over the same windows the volume cap gives $13.4m, and adding open interest cuts it to $0.50m, 27× less, because open interest is the tighter limit in every window. By quarter, the hedged book's median with open interest falls from $1.6m in Q3 2025 to $0.4m in Q2 2026 and returns to $1.6m only in October, close to the decline the volume caps show (`reports/carry/oi_history_hedged.csv`), now measured against a second data source.
 
 ## Validation
-- **Out of sample:** the one rule chosen from the data (> 50% APR entry) failed on the 2025–26 split it was not tuned on.
-- **Survivorship:** every listed contract, including 89 hedgeable delisted coins; liquidity ranked point in time. An earlier version using today's top 40 by volume was discarded for selecting on survival.
-- **Unit check:** default per settlement verified per interval (0.01% at 8h, 0.005% at 4h, 0.00125% at 1h). Funding attribution sums exactly to the engine's funding PnL.
-- **Robustness:** the volume-bucket ordering holds when coins passing briefly through a bucket are dropped. Bootstrap CIs resample coins, the independent unit.
-- **Multiple testing:** 6 of the 25 rotation cells are positive. The best (lookback 21, entry 20% APR, Sharpe 0.49) has a 79% probability of a Sharpe above zero alone and 19% after deflating for 25 trials. The best of 25 skill-less strategies would be expected to show a Sharpe of about 1.0.
-- **Controls:** the unhedged result against the same book without its stop and a no-signal short at matched gross (section 1b). Capacity with a point-in-time filter and a snapshot filter, which agree.
-- **Not done:** the persistence study is funding only. 7 bps per leg is optimistic for small-cap spot. Capacity is a volume cap with square-root impact, not a fill simulation.
+- Out of sample: the one rule chosen from the data (> 50% APR entry) failed on the 2025–26 split it was not tuned on.
+- Survivorship: every listed contract, including 89 hedgeable delisted coins; liquidity ranked point in time. An earlier version using today's top 40 by volume was discarded for selecting on survival.
+- Unit check: default per settlement verified per interval (0.01% at 8h, 0.005% at 4h, 0.00125% at 1h). Funding attribution sums exactly to the engine's funding PnL.
+- Robustness: the volume-bucket ordering holds when coins passing briefly through a bucket are dropped. Bootstrap CIs resample coins, the independent unit.
+- Multiple testing: 6 of the 25 rotation cells are positive. The best (lookback 21, entry 20% APR, Sharpe 0.49) has a 79% probability of a Sharpe above zero alone and 19% after deflating for 25 trials. The best of 25 skill-less strategies would be expected to show a Sharpe of about 1.0.
+- Controls: the unhedged result against the same book without its stop and a no-signal short at matched gross (section 1b). Capacity with a point-in-time filter and a snapshot filter, which agree.
+- Not done: the persistence study is funding only. 7 bps per leg is optimistic for small-cap spot. Capacity is a volume cap with square-root impact, not a fill simulation.
 
 ## What broke
-- **Rotation spends the carry on turnover.** Re-ranking every 8h swaps about one position every one to two settlements. Each swap costs ~28 bps for a fraction of a basis point of extra carry per window. Break-even (~51 days for a 2% APR gap) is longer than almost every spell.
-- **The spell rule was in-sample.** The 50% threshold came from the table that justified it. The 2025–26 split rejected it.
-- **The default is not free.** Liquid coins earn ~4% a year from default settlements and give back ~11% to below-default ones.
-- **The opportunity shrank.** Above-default funding became ~20× rarer in 2025–26 at every interval. Below-default funding rose most in the coins with the most capacity.
-- **My first explanation was wrong.** 4h settlement does not explain shorter spells; the collapse is market-wide.
-- **A timestamp bug inflated the rotation's losses.** The rotation script read raw funding times, which carry millisecond jitter. With 8h windows closed on the right, a 08:00:00.008 settlement landed in the window ending 16:00. About a third of settlements were misaligned; the signal churned; turnover was 511× a year instead of 376×. The capacity study, which used the rounded loader, could not reproduce the baseline, and that exposed it. The two loaders now agree to four decimals, and `per_window` rounds timestamps itself.
-- **The unhedged book's risk layer was its strategy.** An 8% drawdown stop built for a hedged book fired 177 times on a 72%-vol short book and produced all of its +23%. Without the stop the book loses 34% a year.
+- Rotation spends the carry on turnover. Re-ranking every 8h swaps about one position every one to two settlements. Each swap costs ~28 bps for a fraction of a basis point of extra carry per window. Break-even (~51 days for a 2% APR gap) is longer than almost every spell.
+- The spell rule was in-sample. The 50% threshold came from the table that justified it. The 2025–26 split rejected it.
+- The default is not free. Liquid coins earn ~4% a year from default settlements and give back ~11% to below-default ones.
+- The opportunity shrank. Above-default funding became ~20× rarer in 2025–26 at every interval. Below-default funding rose most in the coins with the most capacity.
+- My first explanation was wrong. 4h settlement does not explain shorter spells; the collapse is market-wide.
+- A timestamp bug inflated the rotation's losses. The rotation script read raw funding times, which carry millisecond jitter. With 8h windows closed on the right, a 08:00:00.008 settlement landed in the window ending 16:00. About a third of settlements were misaligned; the signal churned; turnover was 511× a year instead of 376×. The capacity study, which used the rounded loader, could not reproduce the baseline, and that exposed it. The two loaders now agree to four decimals, and `per_window` rounds timestamps itself.
+- The unhedged book's risk layer was its strategy. An 8% drawdown stop built for a hedged book fired 177 times on a 72%-vol short book and produced all of its +23%. Without the stop the book loses 34% a year.
 
-- **Why nobody takes the other side.** Collecting below-default funding means long perp and **short spot**, which means borrowing the coin on margin. The borrow rate, its limited and recallable supply, and the small shortfall below default (a few bps per window on majors) mean the reverse trade does not pay either. So the imbalance persists. Borrow costs were not measured here; they are the next thing to check.
+- Why nobody takes the other side. Collecting below-default funding means long perp and **short spot**, which means borrowing the coin on margin. The borrow rate, its limited and recallable supply, and the small shortfall below default (a few bps per window on majors) mean the reverse trade does not pay either. So the imbalance persists. Borrow costs were not measured here; they are the next thing to check.
 
-- **What predicts below-default funding at decision time.** Liquidity. A top-20 coin by trailing volume was below default in ~72% of 2025–26 windows, the tail in ~37%, and the rank is known in advance. It is half an answer: it says *where*, not *when*. It is a cross-sectional base rate, not a timing signal. Avoiding the liquid coins leaves the illiquid tail, where 7 bps per leg is optimistic, spot depth caps size, and delistings live.
+- What predicts below-default funding at decision time. Liquidity. A top-20 coin by trailing volume was below default in ~72% of 2025–26 windows, the tail in ~37%, and the rank is known in advance. It is half an answer: it says *where*, not *when*. It is a cross-sectional base rate, not a timing signal. Avoiding the liquid coins leaves the illiquid tail, where 7 bps per leg is optimistic, spot depth caps size, and delistings live.
 
 ## Reproduce
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]" && pytest                  # 50 tests
+pip install -e ".[dev]" && pytest                  # 74 tests
 bash scripts/fetch_carry_data.sh 2023-01-01        # universe + funding + hourly perp/spot (~1–2 h)
 # the first study run builds the funding and price matrices in data/processed/ (~15 min, once)
 python scripts/funding_persistence.py              # study 1
