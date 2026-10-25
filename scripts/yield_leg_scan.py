@@ -9,12 +9,20 @@ not deducted. Capacity = min(2% of PT pool liquidity, 1% of that venue's perp OI
 participation rates. USD stablecoin and credit PTs need no hedge: they are fixed income, and their
 liquidity-weighted median implied APY is the benchmark a hedged trade has to beat.
 
+`--lst` scans liquid-staking and restaking tokens instead (DefiLlama yields API): each token's
+issuer pool (apyBase = staking yield, tvlUsd), joined to the same 30-day funding and current perp OI
+for its underlying. Combined carry = staking APY + funding on the venue paying the short most,
+before costs. With a 25% idle margin reserve, 75% of capital holds the token and is hedged with an
+equal perp short, so carry on capital = 0.75 x combined.
+
 A snapshot, dated in the output, not a backtest.
 
-    python scripts/yield_leg_scan.py      # writes reports/yield_leg/scan.csv
+    python scripts/yield_leg_scan.py          # writes reports/yield_leg/scan.csv
+    python scripts/yield_leg_scan.py --lst    # writes reports/yield_leg/lst_scan.csv
 """
 from __future__ import annotations
 
+import argparse
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -175,5 +183,80 @@ def main():
     print(mk.groupby("kind").agg(markets=("market", "size"), pool_liquidity_m=("pool_liquidity_usd", lambda x: x.sum() / 1e6)).round(1).to_string())
 
 
+LLAMA = "https://yields.llama.fi/pools"
+# token -> (DefiLlama issuer project, the pool's symbol there, perp underlying). The issuer's own pool
+# carries the staking yield; lending pools with the same symbol report their lending rate instead.
+# wstETH is wrapped stETH: same yield, same Lido pool. stHYPE has no issuer pool on DefiLlama.
+LST = {
+    "stETH/wstETH": ("lido", "STETH", "ETH"), "rETH": ("rocket-pool", "RETH", "ETH"),
+    "cbETH": ("coinbase-wrapped-staked-eth", "CBETH", "ETH"), "weETH": ("ether.fi-stake", "WEETH", "ETH"),
+    "ezETH": ("renzo", "EZETH", "ETH"), "jitoSOL": ("jito-liquid-staking", "JITOSOL", "SOL"),
+    "mSOL": ("marinade-liquid-staking", "MSOL", "SOL"), "bnSOL": ("binance-staked-sol", "BNSOL", "SOL"),
+    "slisBNB": ("lista-liquid-staking", "SLISBNB", "BNB"), "stHYPE": (None, "STHYPE", "HYPE"),
+    "kHYPE": ("kinetiq-khype", "KHYPE", "HYPE"),
+}
+RESERVE = 0.25
+
+
+def hl_quarterly(coins: list[str]) -> pd.DataFrame:
+    """Hyperliquid funding by calendar quarter, annualised, from the stored hourly history
+    (python -m qr.data.hl_history funding). Partial quarters are marked by their hour count."""
+    import glob
+    out = {}
+    for c in coins:
+        fs = sorted(glob.glob(f"data/raw/hyperliquid/funding/{c}-PERP/**/*.parquet", recursive=True))
+        if not fs:
+            continue
+        r = pd.concat(pd.read_parquet(f) for f in fs)["rate"].astype(float)
+        r = r[~r.index.duplicated()].sort_index()
+        q = r.resample("QE").agg(["sum", "count"])
+        out[f"{c}_apr"] = q["sum"] / (q["count"] / 24) * 365
+        out[f"{c}_hours"] = q["count"]
+    t = pd.DataFrame(out); t.index = t.index.tz_localize(None).to_period("Q").astype(str)
+    return t
+
+
+def lst_main():
+    now = datetime.now(timezone.utc)
+    start_ms = int((now.timestamp() - DAYS * 86400) * 1000)
+    pools = pd.DataFrame(_get(LLAMA)["data"])
+    pools["sym"] = pools.symbol.str.upper()
+    rows = []
+    for tok, (proj, sym, u) in LST.items():
+        m = pools[(pools.project == proj) & (pools.sym == sym)] if proj else pools.iloc[:0]
+        p = m.sort_values("tvlUsd", ascending=False).iloc[0] if len(m) else None
+        rows.append({"token": tok, "underlying": u, "project": proj, "chain": p.chain if p is not None else None,
+                     "staking_apy": p.apyBase / 100 if p is not None and pd.notna(p.apyBase) else None,
+                     "tvl_usd": p.tvlUsd if p is not None else None})
+    df = pd.DataFrame(rows)
+    us = df.underlying.unique()
+    oi = open_interest({s_ for u in us for s_ in candidates(u)["BN"]})
+    fund = {(v, u): funding_30d(v, sym_, start_ms) for u in us for v, syms in candidates(u).items() for sym_ in syms[:1]}
+    for v in ("BN", "BY", "HL"):
+        df[f"funding_30d_{v}"] = [fund.get((v, u)) for u in df.underlying]
+        df[f"perp_oi_usd_{v}"] = [oi[v].get(candidates(u)[v][0]) for u in df.underlying]
+    f = df[[f"funding_30d_{v}" for v in ("BN", "BY", "HL")]].astype(float)
+    hv = [r.idxmax()[-2:] if r.notna().any() else None for _, r in f.iterrows()]
+    df["short_venue"] = hv
+    df["short_funding_apr"] = [df.at[i, f"funding_30d_{v}"] if v else None for i, v in zip(df.index, hv)]
+    df["short_perp_oi_usd"] = [df.at[i, f"perp_oi_usd_{v}"] if v else None for i, v in zip(df.index, hv)]
+    df["combined_carry"] = df.staking_apy + df.short_funding_apr.astype(float)
+    df["carry_with_25pct_reserve"] = (1 - RESERVE) * df.combined_carry
+    df["capacity_1pct_oi_usd"] = PART_OI * df.short_perp_oi_usd.astype(float)      # per underlying, shared by its tokens
+    df["snapshot_utc"] = now.strftime("%Y-%m-%d %H:%M")
+    df = df.sort_values("combined_carry", ascending=False, na_position="last")
+    df.to_csv(OUT / "lst_scan.csv", index=False)
+    pd.set_option("display.width", 250)
+    print(df[["token", "project", "staking_apy", "tvl_usd", "funding_30d_BN", "funding_30d_BY", "funding_30d_HL",
+              "short_venue", "short_funding_apr", "combined_carry", "carry_with_25pct_reserve", "short_perp_oi_usd", "capacity_1pct_oi_usd"]]
+          .to_string(index=False, float_format=lambda v: f"{v:,.4g}"))
+    q = hl_quarterly(list(df.underlying.unique()))
+    q.to_csv(OUT / "lst_hl_funding_quarterly.csv")
+    print("\nHyperliquid funding by quarter (APR; hours in quarter):")
+    print(q.to_string(float_format=lambda v: f"{v:,.3g}"))
+
+
 if __name__ == "__main__":
-    main()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--lst", action="store_true", help="liquid-staking tokens from DefiLlama instead of Pendle PTs")
+    lst_main() if ap.parse_args().lst else main()
