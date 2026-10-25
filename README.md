@@ -3,13 +3,17 @@
 Mid-frequency crypto quant research on perpetual futures: a shared data pipeline, an honest
 backtester, a validation layer, and the strategies built on top of them.
 
-| # | Strategy | Horizon | Status | Note |
+| # | Study | Horizon | Status | Note |
 | --- | --- | --- | --- | --- |
-| 1 | Research infrastructure (this scaffold) | — | in progress | — |
-| 2 | Funding-rate carry (hedged) | 8h | done: does not pay after costs, 2023–26 | `notes/01_carry.md` |
-| 3 | Intraday pairs stat arb | 5m bars | planned | `notes/02_pairs.md` |
-| 4 | Order-book microstructure + execution study | 1–30m | planned | `notes/03_microstructure.md` |
-| 5 | On-chain ML (triple-barrier, purged CV) | 1h | planned | `notes/04_onchain_ml.md` |
+| 1 | Research infrastructure: collector, Parquet store, backtester, validation, capacity, risk | — | built; 74 tests | — |
+| 2 | Funding-rate carry, Binance (hedged) | 8h | done: does not pay after costs, 2023–26 | [`01_carry.md`](notes/01_carry.md) |
+| 3 | Cross-venue funding: Binance, Bybit, Hyperliquid | 8h | done: real spread, under $200k of capacity, negative after impact | [`02_mvenue.md`](notes/02_mvenue.md) |
+| 4 | Order-flow signals on self-collected book data | 1m | superseded: the first sample lost ~70% to host sleep; rerun pending | [`03_flow.md`](notes/03_flow.md) |
+| 5 | Regime-filtered carry at size | monthly | done: almost nothing to switch on after Jan 2025 | [`04_regime.md`](notes/04_regime.md) |
+| 6 | Classifier for above-default funding | 8h | done: matches the persistence rule, does not cover costs | [`05_predict.md`](notes/05_predict.md) |
+| 7 | Yield leg: staking token or PT hedged with a perp short | snapshot | first scan | [`06_yield_leg.md`](notes/06_yield_leg.md) |
+| 8 | Intraday pairs stat arb | 5m bars | planned | — |
+| 9 | On-chain ML (triple-barrier, purged CV) | 1h | planned | — |
 
 Results in this table are after fees, slippage and funding, on a universe that includes delisted
 contracts. If a strategy loses money after costs, the note says so.
@@ -19,7 +23,7 @@ contracts. If a strategy loses money after costs, the note says so.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest                      # 12 tests on the engine, store, bars and collector handlers
+pytest                      # 74 tests
 python scripts/smoke.py     # synthetic end-to-end run -> reports/smoke_tearsheet.png
 ```
 
@@ -60,8 +64,8 @@ qr/
     report.py       tearsheet (equity, drawdown, turnover, exposure) + monthly table
   strategies/
     base.py         Strategy protocol, BuyAndHold and Flat benchmarks
-  signals/          microstructure features (week 3)
-  validation/       deflated Sharpe, walk-forward, parameter-stability grid (stubs, week 3)
+  signals/          order-flow features (flow.py)
+  validation/       deflated Sharpe, walk-forward, parameter-stability grid
 tests/              engine invariants: zero strategy = zero PnL, no look-ahead, costs, funding sign, delisting
 notes/              one 2-page research note per strategy (template in notes/TEMPLATE.md)
 scripts/            smoke.py and later per-strategy runners
