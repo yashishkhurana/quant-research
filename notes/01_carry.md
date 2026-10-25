@@ -149,6 +149,15 @@ The median is $1.2m at 1% of volume and $6.1m at 5%, linear in the participation
 
 The book's size is set by its least liquid holding, and the signal's holdings are small: LSK, MARSCOIN, MUBARAK and STRK each cap the hedged book at $0.3–1.7m before the position is 1% of the contract's open interest, and only ZEC could take eight figures. Open interest is the tighter limit for five of the eight hedged names and ten of the thirteen unhedged ones (`scripts/oi_check.py`, `reports/carry/oi_check_*.csv`); for perp-only coins whose daily volume is many times their open interest (US, 龙虾, BR) the volume cap overstates capacity 26–37×, so the unhedged $18m is an upper bound. This is one week of target holdings against one day of open interest and cannot be run over the backtest; at size the book's own short would also be part of the open interest it is measured against.
 
+*Added 2026-10-25.* With open-interest history from a second data source (CryptoHFTData, from mid-2025; agrees with our 23 Oct snapshot to a median 0.6% across 230 coins), the same check runs over every 8h window from 1 Jul 2025 to 23 Oct 2026 (`scripts/oi_check.py --history`, `reports/carry/oi_history_*.csv`):
+
+| Book | Windows | Median book at 2% of volume | Median book also capped at 1% of OI | OI is the tighter cap |
+| --- | --- | --- | --- | --- |
+| Hedged | 1,429 | $1.55m | $0.89m | 73% of windows |
+| Unhedged | 1,437 | $13.4m | $0.50m | 100% of windows |
+
+Restricting to windows where every held name has OI (88% hedged, 78% unhedged) gives $0.85m and $0.47m. The check said above to be impossible over the backtest now runs over its last 16 months: the hedged book's median is $0.89m, inside the snapshot's $0.3–1.7m range, and in the snapshot week itself it is $0.86m, set by the same names (MARSCOIN, LSK). The unhedged $18m above is wrong, not just an upper bound: over the same windows the volume cap gives $13.4m, and adding open interest cuts it to $0.50m, 27× less, because open interest is the tighter limit in every window. By quarter, the hedged book's median with open interest falls from $1.6m in Q3 2025 to $0.4m in Q2 2026 and returns to $1.6m only in October, close to the decline the volume caps show (`reports/carry/oi_history_hedged.csv`), now measured against a second data source.
+
 ## Validation
 - **Out of sample:** the one rule chosen from the data (> 50% APR entry) was tested on the period split it was not tuned on and failed in 2025–26.
 - **Survivorship:** the universe is every listed contract, including 89 hedgeable delisted coins; liquidity is ranked point in time. An earlier version that used today's top 40 by volume was discarded for selecting on survival.
