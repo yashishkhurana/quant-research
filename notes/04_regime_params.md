@@ -1,6 +1,6 @@
 # Regime-filtered hedged carry at size: parameters fixed before the run
 
-*Written 2026-10-25 03:20 IST, before any result existed. The question: is there a version of
+*Written 2026-10-25 03:09 IST, before any result existed. The question: is there a version of
 single-venue hedged carry on Binance that a $10m book could run, given studies 1–3 and the
 capacity section of the carry note? The design is the one a desk would actually try — hold the
 sizable names, only when the market is paying, at maker fees, with almost no trading — and the
