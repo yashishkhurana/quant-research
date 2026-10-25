@@ -18,6 +18,7 @@ import pandas as pd
 
 from qr.backtest.engine import run
 from qr.backtest.report import tearsheet
+from qr.backtest.report_html import compare_html, excel_tables, tearsheet_html
 from qr.data.history import delisting_times
 from qr.data.store import read_range
 from qr.data.funding import per_window
@@ -87,7 +88,7 @@ def no_signal_short(prices, funding, dvol, p: CarryParams, gross: float) -> pd.D
     return w
 
 
-def unhedged_controls(prices, funding, dvol, p: CarryParams, res_u) -> pd.DataFrame:
+def unhedged_controls(prices, funding, dvol, p: CarryParams, res_u) -> tuple[pd.DataFrame, dict]:
     """2x2: carry signal vs no-signal short (gross matched to the signal's average when invested),
     each with and without the kill switch. Separates what the signal, the stop and the market did."""
     f_perp = funding.rename(columns=lambda b: f"{b}-PERP")
@@ -106,7 +107,7 @@ def unhedged_controls(prices, funding, dvol, p: CarryParams, res_u) -> pd.DataFr
                      "costs_ann": full["costs"], "ann_return": r.metrics["ann_return"], "sharpe": r.metrics["sharpe"],
                      "max_dd": r.metrics["max_drawdown"], "kill_events": r.metrics.get("kill_events", 0),
                      **{f"net_{y}": v for y, v in t["net_compounded"].items()}})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows), runs
 
 
 def stress(res, windows: dict[str, tuple[str, str]]) -> pd.DataFrame:
@@ -167,7 +168,7 @@ def main(a):
               "unhedged_avg_turnover_per_bar": res_u.metrics["avg_turnover_per_bar"],
               "hedged_worst_week": float(wk(res.returns).min()),
               "hedged_worst_week_date": str(wk(res.returns).idxmin().date())})
-    uc = unhedged_controls(prices, funding, dvol, CarryParams(universe_n=a.universe_n, hedged=False), res_u)
+    uc, uc_runs = unhedged_controls(prices, funding, dvol, CarryParams(universe_n=a.universe_n, hedged=False), res_u)
     uc.to_csv(OUT / "unhedged_controls.csv", index=False)
     split_u, _ = pnl_split(res_u)
     split_u.to_csv(OUT / "unhedged_split.csv")
@@ -238,6 +239,11 @@ def main(a):
     st.to_csv(OUT / "stress.csv", index=False)
 
     json.dump(m, open(OUT / "metrics.json", "w"), indent=2, default=float)
+    tearsheet_html(res, "Funding carry, base params", OUT / "tearsheet.html")
+    compare_html({f"{b}, {'with' if k else 'no'} stop": r for (b, k), r in uc_runs.items()}, OUT / "unhedged_2x2.html",
+                 "Unhedged 2x2: carry signal vs no-signal short, with and without the stop")
+    excel_tables({"metrics": pd.Series(m).to_frame("value"), "unhedged_2x2": uc, "unhedged_split": split_u,
+                  "grid_sharpe": tbl, "stress": st}, OUT / "carry.xlsx")
     write_note(m, tbl, st, prices, funding, base, split_u, uc)
     print(json.dumps(m, indent=2, default=float))
 

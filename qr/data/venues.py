@@ -13,7 +13,8 @@ Loaders return matrices with canonical columns:
               qr.data.funding.per_window puts them on 8h windows)
     close     hourly close in the venue's own contract units (bar open time index)
     dvol      hourly dollar volume
-    oi_usd    open interest in USD, hourly (forward-filled from daily; Bybit only, where history exists)
+    oi_usd    open interest in USD, hourly. Binance and Bybit: CryptoHFTData prints before each 8h
+              boundary for the ~110 most-held coins from mid-2025; Bybit also its own daily history
 Delisting times per venue: Binance deliveryDate, Bybit deliveryTime, Hyperliquid the last
 funding settlement of a coin flagged isDelisted.
 """
@@ -137,6 +138,21 @@ def _mask_after(m: pd.DataFrame, times: dict[str, pd.Timestamp]) -> pd.DataFrame
     return m
 
 
+def _vendor_oi(exchange: str, raw_names: dict[str, str], index: pd.DatetimeIndex, start: str, end: str,
+               venue: str) -> pd.DataFrame | None:
+    """Open interest in USD from the CryptoHFTData pull (qr.data.chd), stored for the hours ending
+    01:00, 09:00, 17:00 UTC (the last print before each 8h window boundary), labelled at the hour's
+    end so it is known at its index. Forward-filled at most 8 hours onto the hourly index.
+    Covers only the coins pulled (the studies' most-held ~110) and only from mid-2025."""
+    on_disk = set(_names_on_disk(exchange, "open_interest"))
+    names = {c: r for c, r in raw_names.items() if r in on_disk}
+    if not names:
+        return None
+    m = _cached(venue, f"chdoi", start, end,
+                lambda: _matrix(exchange, "open_interest", names, "oi_usd", start, end), len(names))
+    return m.reindex(index, method="ffill", limit=8) if not m.empty else None
+
+
 def load_binance(start: str, end: str) -> Venue:
     from qr.data.funding import load_funding
     from qr.data.history import delisting_times
@@ -148,8 +164,10 @@ def load_binance(start: str, end: str) -> Venue:
     ren = canon_map(list(f.columns), "BN")
     mult = {ren[b]: canonical(b, "BN")[1] if ren[b] != b or canonical(b, "BN")[0] == b else 1.0 for b in f.columns}
     dl = {ren[b]: t for b, t in delisting_times().items() if b in ren}
-    return Venue("BN", f.rename(columns=ren), close.rename(columns=ren), dvol.rename(columns=ren), None,
-                 mult, dl, {v: k for k, v in ren.items()})
+    raw = {v: k for k, v in ren.items()}
+    close = close.rename(columns=ren)
+    oi_usd = _vendor_oi("chd_binance_futures", raw, close.index, start, end, "BN")
+    return Venue("BN", f.rename(columns=ren), close, dvol.rename(columns=ren), oi_usd, mult, dl, raw)
 
 
 def load_bybit(start: str, end: str) -> Venue:
@@ -172,6 +190,9 @@ def load_bybit(start: str, end: str) -> Venue:
         cols = oi.columns.intersection(close.columns)
         oi_h = oi[cols].reindex(close.index, method="ffill", limit=24 * 2)          # daily print, valid ~1 day
         oi_usd = oi_h * close[cols]
+    v_oi = _vendor_oi("chd_bybit", canon, close.index, start, end, "BY")
+    if v_oi is not None:                                   # 8-hourly vendor prints where pulled, else daily
+        oi_usd = v_oi if oi_usd is None else v_oi.combine_first(oi_usd)
     return Venue("BY", f, close, dvol, oi_usd, mult, dl, canon)
 
 
