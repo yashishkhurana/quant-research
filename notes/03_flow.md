@@ -1,8 +1,8 @@
 # Order-flow signals on binance perps, from our own book data
 
-> **Superseded.** The collector lost ~70% of its sample to host sleep; rerun on a continuous sample follows. (The "21 hours" below summed three symbols; it was about 7 hours each.)
+> **Superseded.** The collector lost about three-quarters of its sample to host sleep (415 of 1,698 minutes kept); rerun on a continuous sample follows. (The "21 hours" below summed three symbols; it was about 7 hours each.) Corrected 26 Oct 2026: the one-line's t-stat belonged to microprice deviation, not OFI, and the "What broke" bullets claimed more than the tables show. The strategy rows came from the backtest engine before its 24 Oct change; rerun now, SOL ofi 15/1.0 and ETH tfi 15/2.0 differ slightly (ETH tfi: 8 trades, not 7).
 
-**One line:** on 21 hours of self-collected L2 snapshots and trades (BTC-PERP, ETH-PERP, SOL-PERP), top-of-book order-flow imbalance predicts the next 5-bar return with t = +1.8 and a top-minus-bottom decile spread of +11.1 bps; after 2 bps of cost per side the best one-feature strategy's edge survives.
+**One line:** on 21 hours of self-collected L2 snapshots and trades (BTC-PERP, ETH-PERP, SOL-PERP), the strongest feature, BTC microprice deviation, predicts the next 5-bar return with t = +1.8 and a top-minus-bottom decile spread of +11.1 bps (order-flow imbalance: t = +1.3, +6.3 bps); no feature reaches |t| = 2; after 2 bps of cost per side the best one-feature strategy's edge survives.
 
 This is a signal study on days of data, not a backtest on years. The t-stats are informative about whether the effect exists at this timescale; the strategy numbers are not an expected return.
 
@@ -105,7 +105,7 @@ At 5 bps per side:
 | BTC-PERP | ofi | 5 | 2.0 | 9 | +0.73% | -0.17% | -6.03 |
 
 ## What broke
-- The effect is real at 1–5 bars and decays fast; at 15–30 bars it is mostly noise. That is consistent with the literature and means the tradeable version is an execution signal (when to place, when to cross), not a position signal.
-- Costs dominate. Gross returns at 1-bar horizons look large because the strategy trades hundreds of times; at 5 bps they go negative. A maker-only implementation would need its own fill model, which is the execution study in the next note.
-- Days of data. Decile spreads of a few bps with t > 3 are credible; anything built on top of them needs weeks of data and a check across regimes.
+- No regression reaches |t| = 2 at any horizon. The best t-stats are at 5 and 15 bars, and decile spreads grow with the horizon rather than decaying. On 7 hours a symbol this cannot separate an effect from noise.
+- Costs dominate. Every 1-bar strategy is already negative at 2 bps per side (at most 84 trades a cell). A maker-only implementation would need its own fill model, which is the execution study in the next note.
+- Days of data. Decile spreads of a few bps would need t > 3 to be credible, and none is above 1.8; anything built on top of them needs weeks of data and a check across regimes.
 - OFI from 100 ms snapshots undercounts flow between snapshots; a diff-based (not snapshot-based) book feed would sharpen it.

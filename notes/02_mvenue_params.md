@@ -23,3 +23,5 @@ net −12.6%/yr). These values are not changed after the full run.*
 | Grid | lookback {3, 9, 21} × margin {0, 5, 10, 20} bps, best cell deflated for 12 trials | shows plateau vs single cell |
 
 Known limits fixed in advance: OKX unreachable from this network; Hyperliquid volume exists only for its last ~7 months of candles, so HL legs cannot be sized (and are not traded in capped runs) before that; Hyperliquid legs are priced off the Binance close, so their basis is reported from HL's premium series rather than simulated; Binance–Bybit pairs carry real basis P&L. In-sample; no walk-forward.
+
+**Erratum, 26 Oct 2026:** the smoke run's basis was −35%/yr, not −41% (funding +48.4%, costs −26.1%, net −12.6%; `reports/mvenue/summary.json`). The parameters above are unchanged.

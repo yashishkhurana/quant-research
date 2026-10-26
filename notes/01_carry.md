@@ -11,7 +11,7 @@ Binance funding has a default: 0.01% per 8h (≈10.95% APR), where the rate sits
 
 ## Data
 - Binance USDT-M perps and spot, hourly closes. Funding 2023-01-01 to 2026-10-21; hourly prices to 2026-10-23.
-- Universe: every USDT perp Binance has listed (655, including 133 delisted). 447 have a spot market and can be hedged. 89 of those are delisted (FTT, FTM, WAVES, MKR, OCEAN, AGIX, …), so the casualties are in the sample. Perp-only coins are excluded from every hedged study.
+- Universe: every USDT perp Binance has listed (655, including 134 delisted). 447 have a spot market and can be hedged. 90 of those are delisted (FTT, FTM, WAVES, MKR, OCEAN, AGIX, …), so the casualties are in the sample. Perp-only coins are excluded from every hedged study.
 - Settlement intervals differ. At the end of the sample 509 coins settle every 4h, 134 every 8h, 12 every 1–2h. 169 dropped to 1h at some point, which Binance does when funding hits its cap. All funding is summed onto fixed 8h UTC windows (`qr/data/funding.py`). The default is 0.01% per 8h window at every interval (0.005% per 4h settlement, 0.00125% per 1h).
 - Liquidity is point in time: trailing 30-day perp dollar volume, completed bars only.
 - Binance keeps serving klines for delisted perps, with a frozen close. Perp prices are cut at each contract's delisting time (`deliveryDate`, 134 contracts). A delisting force-closes the position instead of leaving a frozen perp hedged against live spot.
@@ -47,7 +47,7 @@ The rule *enter above 50% APR, hold until back at default* was chosen from this 
 
 Spells also became rarer. The share of coin-windows above default fell about 20× at both intervals (8h coins 13.9% → 0.7%, 4h coins 25.2% → 1.4%). Listed hedgeable coins rose from 218 to 365. My first explanation, that 4h settlement shortened spells, is wrong. Within each period 4h coins have slightly *longer* spells than 8h coins (2025–26 mean 2.5 vs 2.0 windows). And 8h coins, which never changed interval, collapsed just as much.
 
-> *Corrected 2026-10-23.* An earlier version of this paragraph read raw Binance funding timestamps, which carry millisecond jitter (08:00:00.008). About a third of settlements fell into the following 8h window, which misaligned the rotation signal by one window for those settlements and made it trade more than it should. With timestamps rounded to the minute, the rotation result moved from −20.7% to −13.4% a year and the unhedged result from −0.03% to +23.3% (section 1b). Studies 1–3 already used rounded timestamps and are unchanged.
+> *Corrected 2026-10-23.* An earlier version of this paragraph read raw Binance funding timestamps, which carry millisecond jitter (08:00:00.008). 40% of settlements on 8h boundaries (a quarter of all settlements) fell into the following 8h window, which misaligned the rotation signal by one window for those settlements and made it trade more than it should. With timestamps rounded to the minute, the rotation result moved from −20.7% to −13.4% a year and the unhedged result from −0.03% to +23.3% (section 1b). Studies 1–3 already used rounded timestamps and are unchanged.
 
 The rotation backtest shows the same in PnL. Book: top 10 by trailing 9-window funding among the top 40 by trailing volume. Entry above 10% APR, exit below 3%, decisions at 8h window ends, 25% no-trade band, 8% drawdown kill switch, 2.0× gross, 7 bps per leg. It collected **+11.4% a year in funding and paid −26.3% a year in costs**. Net −13.4% a year, Sharpe −4.2, max drawdown −42.3%, turnover 376× a year. Almost all turnover is selection changes (0.044 per bar from target changes, 0.043 traded; the no-trade band absorbs the rest). Six of the 25 parameter cells have a positive Sharpe, all in the slowest-trading corner (entry 15–30% APR, lookback 9–21 windows). The best is 0.49: a 79% probability of being above zero alone, 19% after deflating for 25 trials. Walk-forward out of sample returns −0.1% a year (Sharpe −0.03). The cells that stop losing are the ones that trade least, and at that pace nothing is left. The loss is in the trading rule; the signal is worth about zero after costs.
 
@@ -61,7 +61,7 @@ The same signal as a short-perp-only book (perp-only coins allowed) returns +23.
 | Carry signal | 8% DD | +51.3% | +10.5% | −14.6% | **+23.3%** | −77% | 177 |
 | Carry signal | none | +4.2% | +20.6% | −14.3% | **−34.3%** | −94% | 0 |
 | No signal, short top 40 | 8% DD | +49.5% | −12.6% | −5.4% | **+15.0%** | −57% | 127 |
-| No signal, short top 40 | none | +13.3% | −16.2% | −1.4% | **−26.6%** | −84% | 0 |
+| No signal, short top 40 | none | +13.3% | −16.2% | −1.4% | **−26.6%** | −83% | 0 |
 
 (Price, funding and costs are simple annual sums; net is compounded.)
 
@@ -83,7 +83,7 @@ On 1 January 2025 the book was down about 55%. The two years that pay come after
 | Ann. return (net) | +2.3% | −11.2% | −4.3% |
 | Ann. vol | 7.3% | 2.0% | 5.5% |
 | Sharpe | 0.35 | −5.99 | −0.78 |
-| Max drawdown | −9.3% | −19.7% | −19.7% |
+| Max drawdown | −9.3% | −19.6% | −19.6% |
 | Price / basis PnL / yr | +0.5% | −1.0% | −0.2% |
 | Funding / yr | +3.5% | −9.7% | −2.8% |
 | from settlements at default | +4.7% | +3.4% | +4.1% |
@@ -149,7 +149,7 @@ The median is $1.2m at 1% of volume and $6.1m at 5%, linear in the participation
 
 The least liquid holding sets the book's size, and the holdings are small. LSK, MARSCOIN, MUBARAK and STRK each cap the hedged book at $0.3–1.7m before the position is 1% of open interest. Only ZEC could take eight figures. Open interest is the tighter limit for five of the eight hedged names and ten of the thirteen unhedged ones (`scripts/oi_check.py`, `reports/carry/oi_check_*.csv`). For perp-only coins whose daily volume is many times their open interest (US, 龙虾, BR), the volume cap overstates capacity 26–37×, so the unhedged $18m is an upper bound. This is one week of holdings against one day of open interest and cannot be run over the backtest. At size the book's own short would also be part of the open interest it is measured against.
 
-*Added 2026-10-25.* With open-interest history from a second data source (CryptoHFTData, from mid-2025; agrees with our 23 Oct snapshot to a median 0.6% across 230 coins), the same check runs over every 8h window from 1 Jul 2025 to 23 Oct 2026 (`scripts/oi_check.py --history`, `reports/carry/oi_history_*.csv`):
+*Added 2026-10-25.* With open-interest history from a second data source (CryptoHFTData, from mid-2025; within a median 0.9% of our 23 Oct snapshot in USD, 0.3% in coins, across 230 coins), the same check runs over every 8h window from 1 Jul 2025 to 23 Oct 2026 (`scripts/oi_check.py --history`, `reports/carry/oi_history_*.csv`):
 
 | Book | Windows | Median book at 2% of volume | Median book also capped at 1% of OI | OI is the tighter cap |
 | --- | --- | --- | --- | --- |
@@ -173,7 +173,7 @@ Restricting to windows where every held name has OI (88% hedged, 78% unhedged) g
 - The default is not free. Liquid coins earn ~4% a year from default settlements and give back ~11% to below-default ones.
 - The opportunity shrank. Above-default funding became ~20× rarer in 2025–26 at every interval. Below-default funding rose most in the coins with the most capacity.
 - My first explanation was wrong. 4h settlement does not explain shorter spells; the collapse is market-wide.
-- A timestamp bug inflated the rotation's losses. The rotation script read raw funding times, which carry millisecond jitter. With 8h windows closed on the right, a 08:00:00.008 settlement landed in the window ending 16:00. About a third of settlements were misaligned; the signal churned; turnover was 511× a year instead of 376×. The capacity study, which used the rounded loader, could not reproduce the baseline, and that exposed it. The two loaders now agree to four decimals, and `per_window` rounds timestamps itself.
+- A timestamp bug inflated the rotation's losses. The rotation script read raw funding times, which carry millisecond jitter. With 8h windows closed on the right, a 08:00:00.008 settlement landed in the window ending 16:00. 40% of settlements on 8h boundaries were misaligned; the signal churned; turnover was 511× a year instead of 376×. The capacity study, which used the rounded loader, could not reproduce the baseline, and that exposed it. The two loaders now agree to four decimals, and `per_window` rounds timestamps itself.
 - The unhedged book's risk layer was its strategy. An 8% drawdown stop built for a hedged book fired 177 times on a 72%-vol short book and produced all of its +23%. Without the stop the book loses 34% a year.
 
 - Why nobody takes the other side. Collecting below-default funding means long perp and **short spot**, which means borrowing the coin on margin. The borrow rate, its limited and recallable supply, and the small shortfall below default (a few bps per window on majors) mean the reverse trade does not pay either. So the imbalance persists. Borrow costs were not measured here; they are the next thing to check.

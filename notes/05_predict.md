@@ -2,13 +2,13 @@
 
 *Fifth note. Does a model find anything in Binance funding that study 1's persistence rule does not?*
 
-**One line:** the classifier is a random forest that predicts whether funding stays above the default, and it doesn't cover the trade: the model matches the rule, and the windows it picks pay only 1/7th of the round-trip cost, adding up to nothing.
+**One line:** the classifier is a random forest that predicts whether funding stays above the default, and it doesn't cover the trade: the model matches the rule, and the windows it picks pay only about 13% of the round-trip cost (3.7 of 28 bp), adding up to nothing.
 
 ## Question
 At the end of an 8h window, will the next window pay above the default? A model is useful only if it beats the rule "it was above the default last window", and only if the windows it picks cover a 28 bp hedged round trip.
 
 ## Method
-- Data: every hedgeable Binance coin, 8h windows, Jan 2023 – Oct 2026. 1.13m coin-windows, 444 coins. 7.7% of next windows are above the default.
+- Data: every hedgeable Binance coin, 8h windows, Jan 2023 – Oct 2026. 1.14m coin-windows, 444 coins. 7.3% of next windows are above the default (7.7% of the scored rows).
 - Features, all known at the window end: last, 3-, 9- and 90-window mean funding; above the default now; spell length; trailing-volume rank; log volume; days since first funding in the sample (from 2023-01-01, so truncated for older coins); settlement interval (forward-filled); hour.
 - Models: the rule (no fitting; the score is last window's funding), logistic regression, random forest (300 trees, depth 8, ≥ 500 per leaf).
 - Validation: five expanding time-ordered folds, one-window gap. Only out-of-fold predictions are scored: 1.03m rows from Sep 2023.

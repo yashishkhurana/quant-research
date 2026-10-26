@@ -26,3 +26,8 @@ the switch can be timed better than monthly, and the share of time ON is part of
 a nuisance. A negative result closes single-venue hedged carry at size on Binance for 2023–26.
 
 In-sample; the regime threshold (the default rate) and the 30-day windows are not tuned; no grid.
+
+**Erratum, 26 Oct 2026** (the table above is left as written before the run):
+- "No ranking" is wrong. When more than 20 coins qualify the code takes the 20 with the highest trailing funding, and that happened in every ON month.
+- The "~$2–4bn/yr of flow" behind the VIP-tier maker fees was an assumption. Realised turnover (sum of |weight change|, `ann_turnover`) was 3.5× (regime) to 9.1× (always on) a year: about $35–91m traded a year on $10m, far below $2–4bn, so those fee tiers are not earned by this book alone.
+- "Months ON that were positive" was not reported.
